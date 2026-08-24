@@ -5,8 +5,11 @@ A node is done only after all of these are true:
 - every dependency is verified;
 - the current attempt has evidence for every acceptance criterion;
 - a reviewer identity differs from the executor identity;
-- the reviewer checks every criterion and records a PASS;
+- the reviewer explicitly checks every criterion, supplies independent review
+  evidence, and records a PASS;
 - the graph remains schema-valid after the transition.
 
 The objective is done only when every node is `verified` and
-`graphctl completion-check` exits successfully. Agent prose is not evidence.
+`graphctl completion-check` exits successfully. Agent prose or a different ID
+alone is not proof of independent verification; use a separate review context
+and concrete, redacted artifact or test evidence.

@@ -1,7 +1,22 @@
-# Platform compatibility
+# Client and operating-system compatibility
 
 Verified on 2026-08-25 against official documentation and the installed CLIs.
 The deterministic core has no platform imports, API calls, or network need.
+
+## Operating systems
+
+The package and installed `graphctl` entry point are tested in GitHub Actions on
+Ubuntu, macOS, and Windows with Python 3.10 and 3.13. The public quick start has
+separate Bash and PowerShell setup commands. Filesystem confinement rejects
+symbolic links on every platform and link-like Windows reparse points,
+including NTFS directory junctions, while allowing non-redirecting cloud
+placeholder tags.
+
+GitHub-hosted runners are the tested CI environment. The pinned v7 releases of
+`actions/checkout` and `actions/setup-python` use the Node 24 action runtime. An
+organization using GitHub Enterprise Server or self-hosted runners must confirm
+that its runner version supports those action releases before reusing this
+workflow.
 
 ## Codex
 
@@ -35,7 +50,12 @@ Local version: `2.1.239 (Claude Code)`.
   and performs no writes.
 - Custom agents support tool restrictions and `isolation: worktree`; the CLI
   also exposes `--worktree`. A worktree is edit isolation, not a security
-  boundary.
+  boundary. `task-graph.json` is untracked, so it does not appear in a new
+  worktree; keep graph commands in the primary checkout.
+- Agent frontmatter honors `tools`, `permissionMode`, and `disallowedTools`,
+  but this release documents that `disallowedTools` is ignored while `tools` is
+  set. The reviewer therefore relies on its `tools` list, and its plan
+  permission mode refuses writes, which is why the caller records the verdict.
 - Plugin packaging is supported, but v1 uses project-scoped standalone config
   to stay small. The canonical `skills/` tree can later be put in a plugin
   without changing core semantics.

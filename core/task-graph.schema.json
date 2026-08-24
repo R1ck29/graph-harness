@@ -6,10 +6,11 @@
   "required": ["version", "objective", "nodes"],
   "properties": {
     "version": {"const": 1},
-    "objective": {"type": "string", "minLength": 1},
+    "objective": {"type": "string", "minLength": 1, "maxLength": 32768},
     "nodes": {
       "type": "array",
       "minItems": 1,
+      "maxItems": 1000,
       "items": {"$ref": "#/$defs/node"}
     }
   },
@@ -19,11 +20,66 @@
       "type": "object",
       "required": ["criterion", "kind", "summary"],
       "properties": {
-        "criterion": {"type": "string", "minLength": 1},
-        "kind": {"type": "string", "minLength": 1},
-        "summary": {"type": "string", "minLength": 1}
+        "criterion": {"type": "string", "minLength": 1, "maxLength": 32768},
+        "kind": {"type": "string", "minLength": 1, "maxLength": 32768},
+        "summary": {"type": "string", "minLength": 1, "maxLength": 32768}
       },
       "additionalProperties": true
+    },
+    "review_context": {
+      "type": "object",
+      "properties": {
+        "relevant_files": {"type": "array", "maxItems": 512, "items": {"type": "string", "minLength": 1, "maxLength": 32768}},
+        "diff_artifact": {"type": ["string", "null"], "minLength": 1, "maxLength": 32768},
+        "test_output_artifact": {"type": ["string", "null"], "minLength": 1, "maxLength": 32768}
+      },
+      "additionalProperties": false
+    },
+    "verification": {
+      "type": "object",
+      "required": [
+        "result", "reviewer_id", "checked_criteria", "evidence", "reason",
+        "faulty_node", "recommendation", "failed_criteria",
+        "affected_downstream_nodes", "reviewed_at"
+      ],
+      "properties": {
+        "result": {"enum": ["pass", "fail", "uncertain"]},
+        "reviewer_id": {"type": "string", "minLength": 1},
+        "checked_criteria": {"type": "array", "maxItems": 128, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 32768}},
+        "evidence": {"type": "array", "maxItems": 512, "items": {"$ref": "#/$defs/evidence"}},
+        "reason": {"type": ["string", "null"]},
+        "faulty_node": {"type": ["string", "null"]},
+        "recommendation": {"type": ["string", "null"]},
+        "failed_criteria": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+        "faulty_node_criteria": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+        "affected_downstream_nodes": {"type": "array", "items": {"type": "string"}},
+        "reviewed_at": {"type": "string", "minLength": 1}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"result": {"const": "pass"}}},
+          "then": {"properties": {"checked_criteria": {"minItems": 1}, "evidence": {"minItems": 1}}}
+        },
+        {
+          "if": {"properties": {"result": {"const": "fail"}}},
+          "then": {
+            "required": ["faulty_node_criteria"],
+            "properties": {
+              "reason": {"type": "string", "minLength": 1},
+              "faulty_node": {"type": "string", "minLength": 1},
+              "recommendation": {"type": "string", "minLength": 1},
+              "failed_criteria": {"minItems": 1},
+              "faulty_node_criteria": {"minItems": 1},
+              "evidence": {"minItems": 1}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"result": {"const": "uncertain"}}},
+          "then": {"properties": {"reason": {"type": "string", "minLength": 1}}}
+        }
+      ],
+      "additionalProperties": false
     },
     "node": {
       "type": "object",
@@ -34,30 +90,43 @@
       ],
       "properties": {
         "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
-        "description": {"type": "string", "minLength": 1},
+        "description": {"type": "string", "minLength": 1, "maxLength": 32768},
         "status": {
           "enum": ["blocked", "ready", "running", "awaiting_verification", "verified", "failed", "invalidated"]
         },
-        "depends_on": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
-        "assigned_role": {"type": "string", "minLength": 1},
-        "acceptance_criteria": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
-        "evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"}},
-        "attempts": {"type": "integer", "minimum": 0},
-        "max_attempts": {"type": "integer", "minimum": 1},
+        "depends_on": {"type": "array", "maxItems": 256, "uniqueItems": true, "items": {"type": "string"}},
+        "assigned_role": {"type": "string", "minLength": 1, "maxLength": 32768},
+        "acceptance_criteria": {"type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 32768}},
+        "evidence": {"type": "array", "maxItems": 512, "items": {"$ref": "#/$defs/evidence"}},
+        "attempts": {"type": "integer", "minimum": 0, "maximum": 20},
+        "max_attempts": {"type": "integer", "minimum": 1, "maximum": 20},
         "failure_reason": {"type": ["string", "null"]},
         "executor_id": {"type": ["string", "null"]},
-        "verification": {"type": ["object", "null"]},
+        "verification": {"anyOf": [{"$ref": "#/$defs/verification"}, {"type": "null"}]},
         "failure_history": {"type": "array"},
         "attempt_history": {"type": "array"},
-        "review_context": {
-          "type": "object",
-          "properties": {
-            "relevant_files": {"type": "array", "items": {"type": "string"}},
-            "diff_artifact": {"type": ["string", "null"]},
-            "test_output_artifact": {"type": ["string", "null"]}
-          },
-          "additionalProperties": false
-        }
+        "review_history": {
+          "type": "array",
+          "maxItems": 512,
+          "items": {
+            "type": "object",
+            "required": ["verification", "submission_evidence", "review_context", "submitted_at", "withdrawn_at"],
+            "properties": {
+              "verification": {
+                "allOf": [
+                  {"$ref": "#/$defs/verification"},
+                  {"properties": {"result": {"const": "uncertain"}}}
+                ]
+              },
+              "submission_evidence": {"type": "array", "maxItems": 512, "items": {"$ref": "#/$defs/evidence"}},
+              "review_context": {"$ref": "#/$defs/review_context"},
+              "submitted_at": {"type": "string", "minLength": 1, "maxLength": 32768},
+              "withdrawn_at": {"type": "string", "minLength": 1, "maxLength": 32768}
+            },
+            "additionalProperties": false
+          }
+        },
+        "review_context": {"$ref": "#/$defs/review_context"}
       },
       "additionalProperties": true
     }

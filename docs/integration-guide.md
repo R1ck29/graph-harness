@@ -13,6 +13,10 @@ evidence kinds and adapter wrappers instead of editing state fields directly.
 - Claude Code: `CLAUDE.md`, `.claude/`, and `adapters/claude/`.
 - `skills/` is the single source of truth. Generated copies must pass
   `python scripts/sync_adapters.py --check`.
+- Never edit a generated skill under `.agents/`, `.claude/`, or `adapters/`
+  directly. Edit `skills/<name>/SKILL.md`, run the sync command, and review the
+  generated diff. The adapter-local copies are retained so each adapter can be
+  distributed independently without handwritten procedure forks.
 
 ## Extension points
 

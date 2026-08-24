@@ -28,6 +28,11 @@ def node(
     if status == "verified":
         criterion = result["acceptance_criteria"][0]
         evidence = {"criterion": criterion, "kind": "test", "summary": "pass"}
+        review_evidence = {
+            "criterion": criterion,
+            "kind": "independent_test",
+            "summary": "reviewer confirmed pass",
+        }
         result.update(
             {
                 "evidence": [evidence],
@@ -38,7 +43,13 @@ def node(
                     "result": "pass",
                     "reviewer_id": f"{node_id}-reviewer",
                     "checked_criteria": [criterion],
-                    "evidence": [evidence],
+                    "evidence": [review_evidence],
+                    "reason": None,
+                    "faulty_node": None,
+                    "recommendation": None,
+                    "failed_criteria": [],
+                    "affected_downstream_nodes": [],
+                    "reviewed_at": "2026-01-01T00:00:00+00:00",
                 },
             }
         )

@@ -5,6 +5,9 @@ description: Recover from a failed task-graph node by consulting compact failure
 
 # Selective recovery
 
+Canonical source: `skills/selective-recovery/SKILL.md`. Copies under client and
+adapter directories are generated; do not edit them directly.
+
 1. Read `core/recovery.md`.
 2. Query only failures relevant to the faulty node or failure type.
 3. Confirm ancestors and unrelated branches remain verified.

@@ -9,6 +9,12 @@ import sys
 import tempfile
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from agent_harness.paths import is_link_like  # noqa: E402
+
 TARGETS = (
     Path(".agents/skills"),
     Path(".claude/skills"),
@@ -29,8 +35,23 @@ def _assert_safe(root: Path, path: Path) -> None:
     current = root
     for part in relative.parts:
         current = current / part
-        if current.is_symlink():
-            raise SyncError(f"symlink is not allowed in adapter trees: {current}")
+        if is_link_like(current):
+            raise SyncError(
+                "link-like (symlink or junction) entry is not allowed "
+                f"in adapter trees: {current}"
+            )
+
+
+def _is_hidden(tree: Path, path: Path) -> bool:
+    """Return whether *path* is a dot entry anywhere below *tree*.
+
+    Editors and file managers leave bookkeeping files such as `.DS_Store` in
+    skill trees. They are not skills, so copying and comparing them would
+    report permanent drift on a developer machine while a clean checkout
+    passes in CI.
+    """
+
+    return any(part.startswith(".") for part in path.relative_to(tree).parts)
 
 
 def _tree_files(root: Path, tree: Path) -> list[Path]:
@@ -40,8 +61,13 @@ def _tree_files(root: Path, tree: Path) -> list[Path]:
     files: list[Path] = []
     for path in tree.rglob("*"):
         _assert_safe(root, path)
-        if path.is_symlink():
-            raise SyncError(f"symlink is not allowed in adapter trees: {path}")
+        if is_link_like(path):
+            raise SyncError(
+                "link-like (symlink or junction) entry is not allowed "
+                f"in adapter trees: {path}"
+            )
+        if _is_hidden(tree, path):
+            continue
         if path.is_file():
             files.append(path)
         elif not path.is_dir():

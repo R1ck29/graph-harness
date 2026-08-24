@@ -1,0 +1,5 @@
+Title: Sample discovery summary
+Intended audience: Internal account team
+Next step: Confirm the meeting agenda with an authorized stakeholder.
+
+This example is deliberately generic and contains no customer or credential data.

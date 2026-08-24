@@ -1,21 +1,69 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 from agent_harness.evals import load_cases, run_suite
 from agent_harness.errors import HarnessError
+from agent_harness.paths import is_link_like
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 SYNC = REPOSITORY / "scripts" / "sync_adapters.py"
 EVAL_RUNNER = REPOSITORY / "evals" / "runner" / "run.py"
+CLAUDE_SETTINGS = REPOSITORY / "adapters" / "claude" / "settings.example.json"
+
+
+def _create_windows_junction(link: Path, target: Path) -> None:
+    """Create a real NTFS junction or skip when the host cannot provide one."""
+
+    if os.name != "nt":
+        raise unittest.SkipTest("NTFS junction regression test requires Windows")
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stdout + result.stderr).strip()
+        raise unittest.SkipTest(f"junction creation unavailable: {detail}")
 
 
 class EvaluationFixtureTests(unittest.TestCase):
+    def test_mount_point_reparse_tag_is_detected_without_path_is_junction(self) -> None:
+        reparse_status = SimpleNamespace(
+            st_reparse_tag=0xA0000003,
+            st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
+        )
+        with mock.patch.object(Path, "is_symlink", return_value=False):
+            with mock.patch.object(Path, "lstat", return_value=reparse_status):
+                self.assertTrue(is_link_like(Path("junction")))
+
+    def test_cloud_reparse_tag_is_not_treated_as_a_junction(self) -> None:
+        reparse_status = SimpleNamespace(
+            st_reparse_tag=0x9000001A,
+            st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
+        )
+        with mock.patch.object(Path, "is_symlink", return_value=False):
+            with mock.patch.object(Path, "lstat", return_value=reparse_status):
+                self.assertFalse(is_link_like(Path("cloud-placeholder")))
+
+    def test_reparse_attribute_is_fail_closed_when_tag_is_unavailable(self) -> None:
+        reparse_status = SimpleNamespace(
+            st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT
+        )
+        with mock.patch.object(Path, "is_symlink", return_value=False):
+            with mock.patch.object(Path, "lstat", return_value=reparse_status):
+                self.assertTrue(is_link_like(Path("untagged-reparse-point")))
+
     def test_five_named_evaluation_cases_load_with_required_objectives(self) -> None:
         cases = load_cases(REPOSITORY / "evals" / "cases")
 
@@ -95,6 +143,31 @@ class EvaluationFixtureTests(unittest.TestCase):
             self.assertEqual(2, result.returncode)
             self.assertEqual("preserve me", target.read_text(encoding="utf-8"))
 
+    def test_eval_runner_rejects_output_through_windows_junction(self) -> None:
+        with tempfile.TemporaryDirectory(dir=REPOSITORY) as workspace_directory:
+            with tempfile.TemporaryDirectory() as outside_directory:
+                junction = Path(workspace_directory) / "junction"
+                outside = Path(outside_directory)
+                _create_windows_junction(junction, outside)
+                try:
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            str(EVAL_RUNNER),
+                            "--output",
+                            str(junction / "result.json"),
+                        ],
+                        cwd=REPOSITORY,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+
+                    self.assertEqual(2, result.returncode)
+                    self.assertFalse((outside / "result.json").exists())
+                finally:
+                    os.rmdir(junction)
+
 
 class AdapterSyncTests(unittest.TestCase):
     def _run(self, root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
@@ -151,6 +224,53 @@ class AdapterSyncTests(unittest.TestCase):
             self.assertIn("stale.md", result.stderr)
             self.assertTrue(stale.exists())
 
+    def test_editor_bookkeeping_files_are_neither_generated_nor_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "skills" / "review.md"
+            source.parent.mkdir(parents=True)
+            source.write_text("canonical\n", encoding="utf-8")
+            (root / "skills" / ".DS_Store").write_bytes(b"BUD1 editor state")
+
+            generate = self._run(root)
+            self.assertEqual(0, generate.returncode, generate.stderr)
+            self.assertNotIn(".DS_Store", generate.stdout)
+
+            for relative in (
+                ".agents/skills",
+                ".claude/skills",
+                "adapters/codex/skills",
+                "adapters/claude/skills",
+            ):
+                self.assertTrue((root / relative / "review.md").exists())
+                self.assertFalse((root / relative / ".DS_Store").exists())
+
+            confirm = self._run(root, "--check")
+            self.assertEqual(0, confirm.returncode, confirm.stderr)
+
+    def test_hidden_generated_file_is_not_reported_as_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "skills" / "review.md"
+            source.parent.mkdir(parents=True)
+            source.write_text("canonical\n", encoding="utf-8")
+            for relative in (
+                ".agents/skills",
+                ".claude/skills",
+                "adapters/codex/skills",
+                "adapters/claude/skills",
+            ):
+                target = root / relative
+                target.mkdir(parents=True)
+                (target / "review.md").write_text("canonical\n", encoding="utf-8")
+            leftover = root / ".claude" / "skills" / ".DS_Store"
+            leftover.write_bytes(b"BUD1 editor state")
+
+            result = self._run(root, "--check")
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertTrue(leftover.exists())
+
     def test_sync_removes_stale_targets_when_canonical_tree_is_empty(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -200,3 +320,28 @@ class AdapterSyncTests(unittest.TestCase):
 
             self.assertEqual(2, result.returncode)
             self.assertIn("symlink", result.stderr.lower())
+
+    def test_sync_rejects_junctioned_canonical_tree_on_windows(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "linked.md").write_text("local secret\n", encoding="utf-8")
+            junction = root / "skills"
+            _create_windows_junction(junction, outside)
+            try:
+                result = self._run(root, "--check")
+
+                self.assertEqual(2, result.returncode)
+                self.assertIn("link-like", result.stderr.lower())
+            finally:
+                os.rmdir(junction)
+
+
+class ClaudeHookPortabilityTests(unittest.TestCase):
+    def test_example_uses_the_project_selected_python_command(self) -> None:
+        settings = json.loads(CLAUDE_SETTINGS.read_text(encoding="utf-8"))
+        command = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
+
+        self.assertTrue(command.startswith("python "))
+        self.assertNotIn("python3", command)

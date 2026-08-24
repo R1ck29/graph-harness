@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "objective": "Prepare and independently verify a client-ready sample deliverable.",
+  "nodes": [
+    {
+      "id": "deliverable",
+      "description": "Prepare the redacted sample deliverable for review.",
+      "status": "blocked",
+      "depends_on": [],
+      "assigned_role": "executor",
+      "acceptance_criteria": [
+        "the deliverable contains a title, intended audience, and next step without customer data"
+      ],
+      "evidence": [],
+      "attempts": 0,
+      "max_attempts": 2,
+      "failure_reason": null
+    }
+  ]
+}

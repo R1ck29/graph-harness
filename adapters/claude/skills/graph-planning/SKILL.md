@@ -5,6 +5,9 @@ description: Convert a non-trivial coding objective into a validated dependency 
 
 # Graph planning
 
+Canonical source: `skills/graph-planning/SKILL.md`. Copies under client and
+adapter directories are generated; do not edit them directly.
+
 1. Read `core/protocol.md` and `roles/planner.md`.
 2. Split the objective into observable outcomes, not activity lists.
 3. Add dependencies only when an output is truly required downstream.

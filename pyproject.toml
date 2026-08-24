@@ -1,7 +1,7 @@
 [project]
 name = "graph-engineering-agent-harness"
 version = "0.1.0"
-description = "A vendor-neutral task graph harness for coding agents"
+description = "A vendor-neutral task-state harness for structured human and agent workflows"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 

@@ -10,6 +10,7 @@ from typing import Any
 from unittest import mock
 
 from agent_harness import cli
+from agent_harness.errors import HarnessError
 from agent_harness.graph import Graph
 from agent_harness.storage import GraphStore
 
@@ -47,6 +48,99 @@ class GraphCtlAtomicityTests(unittest.TestCase):
     def _write_graph(self, path: Path, payload: dict[str, Any]) -> None:
         path.write_text(json.dumps(payload), encoding="utf-8")
 
+    def test_init_creates_ready_graph_and_refuses_to_overwrite_it(self) -> None:
+        with tempfile.TemporaryDirectory(dir=REPOSITORY) as directory:
+            path = Path(directory) / "new-graph.json"
+            arguments = (
+                "--graph",
+                str(path),
+                "init",
+                "--objective",
+                "Prepare the client brief",
+                "--criterion",
+                "facts are sourced",
+                "--criterion",
+                "recommendations are actionable",
+            )
+
+            created = self._run(*arguments)
+
+            self.assertEqual(0, created.returncode, created.stderr)
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual("ready", saved["nodes"][0]["status"])
+            self.assertEqual(
+                ["facts are sourced", "recommendations are actionable"],
+                saved["nodes"][0]["acceptance_criteria"],
+            )
+            before = path.read_text(encoding="utf-8")
+            rejected = self._run(*arguments)
+            self.assertEqual(2, rejected.returncode)
+            self.assertIn("already exists", rejected.stderr)
+            self.assertEqual(before, path.read_text(encoding="utf-8"))
+
+    def test_init_does_not_overwrite_file_created_during_publish(self) -> None:
+        with tempfile.TemporaryDirectory(dir=REPOSITORY) as directory:
+            path = Path(directory) / "raced-graph.json"
+            arguments = cli.build_parser().parse_args(
+                [
+                    "--graph",
+                    str(path),
+                    "init",
+                    "--objective",
+                    "Prepare a brief",
+                    "--criterion",
+                    "brief is complete",
+                ]
+            )
+
+            def competing_create(source: str, destination: str) -> None:
+                del source
+                Path(destination).write_text("competitor data\n", encoding="utf-8")
+                raise FileExistsError(destination)
+
+            with mock.patch("agent_harness.cli.os.link", side_effect=competing_create):
+                with self.assertRaisesRegex(HarnessError, "already exists"):
+                    cli.run(arguments)
+
+            self.assertEqual("competitor data\n", path.read_text(encoding="utf-8"))
+
+    def test_doctor_reports_graph_and_lock_without_changing_either(self) -> None:
+        with tempfile.TemporaryDirectory(dir=REPOSITORY) as directory:
+            path = Path(directory) / "task-graph.json"
+            lock_path = path.with_suffix(path.suffix + ".lock")
+            self._write_graph(path, graph(node("plan")))
+            lock_path.write_text("43210\n", encoding="utf-8")
+            graph_before = path.read_text(encoding="utf-8")
+            lock_before = lock_path.read_text(encoding="utf-8")
+
+            diagnosed = self._run("--graph", str(path), "doctor")
+
+            self.assertEqual(0, diagnosed.returncode, diagnosed.stderr)
+            report = json.loads(diagnosed.stdout)
+            self.assertTrue(report["graph_valid"])
+            self.assertTrue(report["lock_present"])
+            self.assertFalse(report["healthy"])
+            self.assertEqual(str(lock_path), report["lock_path"])
+            self.assertEqual(43210, report["lock_pid"])
+            self.assertEqual(graph_before, path.read_text(encoding="utf-8"))
+            self.assertEqual(lock_before, lock_path.read_text(encoding="utf-8"))
+
+    def test_evidence_help_warns_about_persistent_and_shell_history(self) -> None:
+        for command in ("submit", "verify"):
+            help_result = self._run(command, "--help")
+
+            self.assertEqual(0, help_result.returncode, help_result.stderr)
+            self.assertIn("content persists", help_result.stdout)
+            self.assertIn("in the graph", help_result.stdout)
+            self.assertIn("shell history", help_result.stdout)
+
+    def test_evidence_file_must_be_a_regular_file(self) -> None:
+        with tempfile.TemporaryDirectory(dir=REPOSITORY) as directory:
+            relative = Path(directory).relative_to(REPOSITORY)
+
+            with self.assertRaisesRegex(HarnessError, "regular file"):
+                cli._evidence(f"@{relative}")
+
     def test_happy_path_persists_each_cli_state_transition(self) -> None:
         with tempfile.TemporaryDirectory(dir=REPOSITORY) as directory:
             path = Path(directory) / "task-graph.json"
@@ -79,6 +173,10 @@ class GraphCtlAtomicityTests(unittest.TestCase):
                 "--pass",
                 "--reviewer-id",
                 "reviewer",
+                "--criterion",
+                "relevant tests pass",
+                "--evidence",
+                "reviewer reran tests successfully",
             )
 
             self.assertEqual(0, completed.returncode, completed.stderr)
@@ -86,6 +184,57 @@ class GraphCtlAtomicityTests(unittest.TestCase):
             saved = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual("verified", saved["nodes"][0]["status"])
             self.assertEqual("reviewer", saved["nodes"][0]["reviewer_id"])
+
+    def test_uncertain_cli_result_explains_and_supports_safe_resubmission(self) -> None:
+        with tempfile.TemporaryDirectory(dir=REPOSITORY) as directory:
+            path = Path(directory) / "task-graph.json"
+            self._write_graph(path, graph(node("plan")))
+            self.assertEqual(
+                0,
+                self._run(
+                    "--graph", str(path), "start", "plan", "--executor-id", "impl"
+                ).returncode,
+            )
+            self.assertEqual(
+                0,
+                self._run(
+                    "--graph",
+                    str(path),
+                    "submit",
+                    "plan",
+                    "--evidence",
+                    "initial evidence",
+                    "--actor-id",
+                    "impl",
+                ).returncode,
+            )
+            uncertain = self._run(
+                "--graph",
+                str(path),
+                "verify",
+                "plan",
+                "--uncertain",
+                "--reviewer-id",
+                "reviewer",
+                "--reason",
+                "need complete output",
+            )
+
+            self.assertEqual(0, uncertain.returncode, uncertain.stderr)
+            self.assertIn("withdraw", json.loads(uncertain.stdout)["next_action"])
+            withdrawn = self._run(
+                "--graph",
+                str(path),
+                "withdraw",
+                "plan",
+                "--actor-id",
+                "impl",
+            )
+            self.assertEqual(0, withdrawn.returncode, withdrawn.stderr)
+            self.assertEqual("running", json.loads(withdrawn.stdout)["status"])
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(1, saved["nodes"][0]["attempts"])
+            self.assertIsNone(saved["nodes"][0].get("verification"))
 
     def test_failed_cli_command_does_not_partially_mutate_graph_file(self) -> None:
         with tempfile.TemporaryDirectory(dir=REPOSITORY) as directory:
@@ -131,6 +280,8 @@ class GraphCtlAtomicityTests(unittest.TestCase):
                     "bug",
                     "--failed-criterion",
                     "relevant tests pass",
+                    "--evidence",
+                    "reviewer reproduced the bug",
                 ]
             )
 
@@ -156,6 +307,9 @@ class GraphCtlAtomicityTests(unittest.TestCase):
                 reviewer_id="reviewer",
                 reason="bug",
                 failed_criteria=["relevant tests pass"],
+                review_evidence=[
+                    {"kind": "test", "summary": "reviewer reproduced the bug"}
+                ],
             )
             GraphStore(path).save(task_graph)
 
@@ -177,3 +331,45 @@ class GraphCtlAtomicityTests(unittest.TestCase):
 
             self.assertEqual(2, rejected.returncode)
             self.assertIn("outside the workspace", rejected.stderr)
+            self.assertIn("run the command from the directory", rejected.stderr)
+
+    def test_parent_directory_graph_is_refused_with_working_directory_guidance(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(dir=REPOSITORY) as directory:
+            root = Path(directory)
+            self._write_graph(root / "task-graph.json", graph(node("plan")))
+            nested = root / "package"
+            nested.mkdir()
+
+            rejected = subprocess.run(
+                [
+                    sys.executable,
+                    str(GRAPHCTL),
+                    "--graph",
+                    "../task-graph.json",
+                    "ready",
+                ],
+                cwd=nested,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(2, rejected.returncode)
+            self.assertIn("outside the workspace", rejected.stderr)
+            self.assertIn("run the command from the directory", rejected.stderr)
+
+    def test_missing_graph_names_the_recovery_commands(self) -> None:
+        with tempfile.TemporaryDirectory(dir=REPOSITORY) as directory:
+            missing = subprocess.run(
+                [sys.executable, str(GRAPHCTL), "ready"],
+                cwd=Path(directory),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(2, missing.returncode)
+            self.assertIn("graph file not found", missing.stderr)
+            self.assertIn("graphctl init", missing.stderr)

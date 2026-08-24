@@ -14,3 +14,9 @@ descendants stay invalidated until their
 dependencies are verified and each descendant is explicitly retried. Attempts
 are archived before retry, and `max_attempts` prevents infinite loops. If the
 limit is reached, stop and escalate rather than resetting counters.
+
+An UNCERTAIN review is not a failed attempt. Use `graphctl withdraw NODE
+--actor-id EXECUTOR` and resubmit within the same attempt. If a crashed writer
+left a lock, run `graphctl doctor` to inspect the graph and exact lock path. The
+harness never removes locks automatically; confirm no writer is active before
+manually removing only the reported lock.

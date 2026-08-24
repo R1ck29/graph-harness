@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from agent_harness.errors import HarnessError  # noqa: E402
+from agent_harness.paths import workspace_path  # noqa: E402
 from agent_harness.storage import GraphStore  # noqa: E402
 
 
@@ -30,10 +31,10 @@ def main() -> int:
         return 2
     if payload.get("stop_hook_active"):
         return 0
-    graph_path = ROOT / "task-graph.json"
-    if not graph_path.exists():
-        return 0
     try:
+        graph_path = workspace_path("task-graph.json", ROOT)
+        if not graph_path.exists():
+            return 0
         graph = GraphStore(graph_path).load()
         graph.completion_check()
     except (HarnessError, OSError) as exc:

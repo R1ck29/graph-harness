@@ -68,6 +68,9 @@ def compare_case(case: dict[str, Any]) -> dict[str, Any]:
         reviewer_id=f"eval-reviewer:{failure_node}",
         reason="injected evaluation failure",
         failed_criteria=[target["acceptance_criteria"][0]],
+        review_evidence=_criterion_evidence(
+            target, "injected independent failure evidence"
+        ),
     )
     unrelated_preserved = all(
         graph.node(node_id)["status"] == status for node_id, status in unrelated.items()
@@ -132,6 +135,10 @@ def _complete_ancestors(graph: Graph, failure_node: str, ancestors: set[str]) ->
                 node_id,
                 "pass",
                 reviewer_id=f"eval-reviewer:{node_id}",
+                checked_criteria=node["acceptance_criteria"],
+                review_evidence=_criterion_evidence(
+                    node, "simulated independent review evidence"
+                ),
             )
             remaining.remove(node_id)
             progress = True

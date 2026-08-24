@@ -14,6 +14,16 @@ class GraphSchemaAndSchedulingTests(unittest.TestCase):
 
         task_graph.validate()
 
+    def test_validate_rejects_legacy_schema_version_without_canonical_version(
+        self,
+    ) -> None:
+        invalid = graph(node("plan"))
+        invalid["schema_version"] = "1.0"
+        del invalid["version"]
+
+        with self.assertRaisesRegex(HarnessError, "version must be 1"):
+            Graph.from_dict(invalid)
+
     def test_validate_rejects_missing_required_node_field(self) -> None:
         invalid = node("plan")
         del invalid["assigned_role"]
@@ -84,6 +94,64 @@ class GraphSchemaAndSchedulingTests(unittest.TestCase):
         with self.assertRaises(HarnessError):
             Graph.from_dict(graph(malformed))
 
+    def test_validate_rejects_malformed_withdrawal_review_history(self) -> None:
+        malformed = node("plan")
+        malformed["review_history"] = [
+            {"verification": {}, "submission_evidence": "not-a-list"}
+        ]
+
+        with self.assertRaisesRegex(HarnessError, "review_history"):
+            Graph.from_dict(graph(malformed))
+
+    def test_validate_rejects_malformed_live_and_archived_reviews(self) -> None:
+        task_graph = Graph.from_dict(graph(node("plan")))
+        task_graph.start("plan", executor_id="executor")
+        task_graph.submit(
+            "plan", [{"kind": "test", "summary": "incomplete"}], actor_id="executor"
+        )
+        task_graph.verify(
+            "plan",
+            "uncertain",
+            reviewer_id="reviewer",
+            reason="more evidence needed",
+        )
+
+        malformed_live = task_graph.to_dict()
+        del malformed_live["nodes"][0]["verification"]["reviewer_id"]
+        with self.assertRaisesRegex(HarnessError, "verification fields"):
+            Graph.from_dict(malformed_live)
+
+        task_graph.withdraw_submission("plan", actor_id="executor")
+        malformed_history = task_graph.to_dict()
+        del malformed_history["nodes"][0]["review_history"][0]["verification"][
+            "reviewer_id"
+        ]
+        with self.assertRaisesRegex(HarnessError, "verification fields"):
+            Graph.from_dict(malformed_history)
+
+    def test_status_summary_includes_actionable_next_step_per_node(self) -> None:
+        task_graph = Graph.from_dict(graph(node("plan")))
+
+        self.assertIn(
+            "start plan", task_graph.status_summary()["nodes"][0]["next_action"]
+        )
+        task_graph.start("plan", executor_id="executor")
+        self.assertIn(
+            "submit plan", task_graph.status_summary()["nodes"][0]["next_action"]
+        )
+        task_graph.submit(
+            "plan", [{"kind": "test", "summary": "initial result"}], actor_id="executor"
+        )
+        task_graph.verify(
+            "plan",
+            "uncertain",
+            reviewer_id="reviewer",
+            reason="need stronger evidence",
+        )
+        self.assertIn(
+            "withdraw plan", task_graph.status_summary()["nodes"][0]["next_action"]
+        )
+
 
 class GraphVerificationTests(unittest.TestCase):
     def _submitted_graph(self) -> Graph:
@@ -134,11 +202,118 @@ class GraphVerificationTests(unittest.TestCase):
     def test_independent_reviewer_can_verify_evidenced_submission(self) -> None:
         task_graph = self._submitted_graph()
 
-        task_graph.verify("implement", "PASS", reviewer_id="reviewer-1")
+        task_graph.verify(
+            "implement",
+            "PASS",
+            reviewer_id="reviewer-1",
+            checked_criteria=["relevant tests pass"],
+            review_evidence=[
+                {
+                    "kind": "test",
+                    "summary": "reviewer reran the test suite successfully",
+                }
+            ],
+        )
 
         verified = task_graph.node("implement")
         self.assertEqual("verified", verified["status"])
         self.assertEqual("reviewer-1", verified["reviewer_id"])
+
+    def test_pass_requires_explicit_review_criteria_and_review_evidence(self) -> None:
+        task_graph = self._submitted_graph()
+
+        with self.assertRaisesRegex(HarnessError, "explicit checked criteria"):
+            task_graph.verify(
+                "implement",
+                "PASS",
+                reviewer_id="reviewer-1",
+                review_evidence=[{"kind": "test", "summary": "review pass"}],
+            )
+
+        with self.assertRaisesRegex(HarnessError, "explicit review evidence"):
+            task_graph.verify(
+                "implement",
+                "PASS",
+                reviewer_id="reviewer-1",
+                checked_criteria=["relevant tests pass"],
+            )
+
+        with self.assertRaisesRegex(HarnessError, "every criterion"):
+            task_graph.verify(
+                "implement",
+                "PASS",
+                reviewer_id="reviewer-1",
+                checked_criteria=[],
+                review_evidence=[],
+            )
+
+        self.assertEqual(
+            "awaiting_verification", task_graph.node("implement")["status"]
+        )
+
+    def test_uncertain_submission_can_be_withdrawn_and_replaced_in_same_attempt(
+        self,
+    ) -> None:
+        task_graph = self._submitted_graph()
+        original = task_graph.node("implement")
+        original["review_context"] = {
+            "relevant_files": ["src/old.py"],
+            "diff_artifact": "artifacts/old.diff",
+            "test_output_artifact": "artifacts/old-tests.txt",
+        }
+        original_submitted_at = original["submitted_at"]
+        task_graph.verify(
+            "implement",
+            "UNCERTAIN",
+            reviewer_id="reviewer-1",
+            reason="test output is incomplete",
+        )
+
+        task_graph.withdraw_submission("implement", actor_id="implementer-1")
+        task_graph.submit(
+            "implement",
+            [{"kind": "test", "summary": "complete test output"}],
+            actor_id="implementer-1",
+        )
+
+        resubmitted = task_graph.node("implement")
+        self.assertEqual("awaiting_verification", resubmitted["status"])
+        self.assertEqual(1, resubmitted["attempts"])
+        self.assertEqual("complete test output", resubmitted["evidence"][0]["summary"])
+        self.assertIsNone(resubmitted.get("verification"))
+        self.assertEqual(
+            "test output is incomplete",
+            resubmitted["review_history"][-1]["verification"]["reason"],
+        )
+        archived = resubmitted["review_history"][-1]
+        self.assertEqual(original_submitted_at, archived["submitted_at"])
+        self.assertEqual(
+            {
+                "relevant_files": ["src/old.py"],
+                "diff_artifact": "artifacts/old.diff",
+                "test_output_artifact": "artifacts/old-tests.txt",
+            },
+            archived["review_context"],
+        )
+
+    def test_withdraw_requires_uncertain_review_and_matching_executor(self) -> None:
+        task_graph = self._submitted_graph()
+
+        with self.assertRaisesRegex(HarnessError, "UNCERTAIN"):
+            task_graph.withdraw_submission("implement", actor_id="implementer-1")
+
+        task_graph.verify(
+            "implement",
+            "uncertain",
+            reviewer_id="reviewer-1",
+            reason="need a clearer artifact",
+        )
+        self.assertEqual([], task_graph.node("implement")["verification"]["evidence"])
+        self.assertEqual(
+            [], task_graph.node("implement")["verification"]["checked_criteria"]
+        )
+        with self.assertRaisesRegex(HarnessError, "must match the executor"):
+            task_graph.withdraw_submission("implement", actor_id="someone-else")
 
     def test_review_packet_carries_reproducible_context_artifacts(self) -> None:
         task_graph = Graph.from_dict(graph(node("implement")))
@@ -169,6 +344,9 @@ class GraphVerificationTests(unittest.TestCase):
             reviewer_id="reviewer-1",
             reason="acceptance test fails on empty input",
             failed_criteria=["relevant tests pass"],
+            review_evidence=[
+                {"kind": "test", "summary": "reviewer reproduced the failure"}
+            ],
         )
 
         failed = task_graph.node("implement")
@@ -202,6 +380,9 @@ class GraphVerificationTests(unittest.TestCase):
             reviewer_id="reviewer",
             reason="bug",
             failed_criteria=["relevant tests pass"],
+            review_evidence=[
+                {"kind": "test", "summary": "reviewer reproduced the bug"}
+            ],
         )
 
         self.assertEqual(["c", "d"], invalidated)
@@ -227,6 +408,9 @@ class GraphVerificationTests(unittest.TestCase):
             reviewer_id="reviewer-1",
             reason="first failure",
             failed_criteria=["relevant tests pass"],
+            review_evidence=[
+                {"kind": "test", "summary": "reviewer observed first failure"}
+            ],
         )
 
         task_graph.retry("fix")
@@ -241,6 +425,9 @@ class GraphVerificationTests(unittest.TestCase):
             reviewer_id="reviewer-2",
             reason="second failure",
             failed_criteria=["relevant tests pass"],
+            review_evidence=[
+                {"kind": "test", "summary": "reviewer observed second failure"}
+            ],
         )
 
         with self.assertRaises(HarnessError):
@@ -270,6 +457,60 @@ class GraphVerificationTests(unittest.TestCase):
             "awaiting_verification", task_graph.node("implement")["status"]
         )
 
+    def test_fail_requires_explicit_reviewer_evidence(self) -> None:
+        task_graph = self._submitted_graph()
+
+        with self.assertRaisesRegex(HarnessError, "explicit review evidence"):
+            task_graph.verify(
+                "implement",
+                "fail",
+                reviewer_id="reviewer",
+                reason="reviewer found a defect",
+                failed_criteria=["relevant tests pass"],
+            )
+
+        self.assertEqual(
+            "awaiting_verification", task_graph.node("implement")["status"]
+        )
+
+    def test_fail_defaults_checked_criteria_to_only_failed_criteria(self) -> None:
+        task = node("implement")
+        task["acceptance_criteria"] = ["unit tests pass", "docs are current"]
+        task_graph = Graph.from_dict(graph(task))
+        task_graph.start("implement", executor_id="executor")
+        task_graph.submit(
+            "implement",
+            [
+                {"criterion": "unit tests pass", "kind": "test", "summary": "fail"},
+                {
+                    "criterion": "docs are current",
+                    "kind": "inspection",
+                    "summary": "current",
+                },
+            ],
+            actor_id="executor",
+        )
+
+        task_graph.verify(
+            "implement",
+            "fail",
+            reviewer_id="reviewer",
+            reason="unit test failure",
+            failed_criteria=["unit tests pass"],
+            review_evidence=[
+                {
+                    "criterion": "unit tests pass",
+                    "kind": "test",
+                    "summary": "reviewer reproduced failure",
+                }
+            ],
+        )
+
+        self.assertEqual(
+            ["unit tests pass"],
+            task_graph.node("implement")["verification"]["checked_criteria"],
+        )
+
     def test_downstream_review_can_reopen_verified_faulty_ancestor(self) -> None:
         faulty = node("b", status="verified", depends_on=["a"])
         faulty["acceptance_criteria"] = ["b contract holds"]
@@ -296,6 +537,9 @@ class GraphVerificationTests(unittest.TestCase):
             faulty_node="b",
             failed_criteria=["relevant tests pass"],
             faulty_criteria=["b contract holds"],
+            review_evidence=[
+                {"kind": "test", "summary": "reviewer observed contract mismatch"}
+            ],
         )
 
         self.assertEqual(["c"], invalidated)

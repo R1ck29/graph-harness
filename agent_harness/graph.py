@@ -78,8 +78,8 @@ class Graph:
 
     def validate(self) -> None:
         doc = self.document
-        version = doc.get("version", doc.get("schema_version"))
-        if version not in {1, "1.0"}:
+        version = doc.get("version")
+        if not isinstance(version, int) or isinstance(version, bool) or version != 1:
             raise HarnessError("version must be 1")
         if not isinstance(doc.get("objective"), str) or not doc["objective"].strip():
             raise HarnessError("objective must be a non-empty string")
@@ -183,10 +183,24 @@ class Graph:
             )
         ):
             raise HarnessError(f"node {node_id} executor_id must be null or non-empty")
+        verification = node.get("verification")
+        if verification is not None:
+            self._validate_verification(
+                verification, node_id, set(node["acceptance_criteria"])
+            )
+            if verification["reviewer_id"] == node.get("executor_id"):
+                raise HarnessError(
+                    f"node {node_id} verification reviewer must be independent"
+                )
         if not isinstance(node.get("failure_history", []), list):
             raise HarnessError(f"node {node_id} failure_history must be a list")
         if not isinstance(node.get("attempt_history", []), list):
             raise HarnessError(f"node {node_id} attempt_history must be a list")
+        self._validate_review_history(
+            node.get("review_history", []),
+            node_id,
+            set(node["acceptance_criteria"]),
+        )
         self._validate_review_context(node.get("review_context", {}), node_id)
 
     @staticmethod
@@ -208,6 +222,158 @@ class Graph:
                         f"node {node_id} evidence entry {field} exceeds the text limit"
                     )
 
+    def _validate_verification(
+        self, verification: Any, node_id: str, expected: set[str]
+    ) -> None:
+        required = {
+            "result",
+            "reviewer_id",
+            "checked_criteria",
+            "evidence",
+            "reason",
+            "faulty_node",
+            "recommendation",
+            "failed_criteria",
+            "affected_downstream_nodes",
+            "reviewed_at",
+        }
+        allowed = required | {"faulty_node_criteria"}
+        if not isinstance(verification, dict):
+            raise HarnessError(f"node {node_id} verification must be an object")
+        if not required.issubset(verification) or set(verification) - allowed:
+            raise HarnessError(
+                f"node {node_id} verification fields do not match the v1 contract"
+            )
+        result = verification["result"]
+        if not isinstance(result, str) or result not in RESULTS:
+            raise HarnessError(f"node {node_id} verification result is invalid")
+        for field in ("reviewer_id", "reviewed_at"):
+            value = verification[field]
+            if not isinstance(value, str) or not value.strip() or len(value) > MAX_TEXT:
+                raise HarnessError(
+                    f"node {node_id} verification {field} must be non-empty"
+                )
+        for field in ("reason", "faulty_node", "recommendation"):
+            value = verification[field]
+            if value is not None and (
+                not isinstance(value, str) or not value.strip() or len(value) > MAX_TEXT
+            ):
+                raise HarnessError(
+                    f"node {node_id} verification {field} must be null or non-empty"
+                )
+        checked = verification["checked_criteria"]
+        failed = verification["failed_criteria"]
+        affected = verification["affected_downstream_nodes"]
+        for field, values, limit in (
+            ("checked_criteria", checked, MAX_CRITERIA),
+            ("failed_criteria", failed, MAX_CRITERIA),
+            ("affected_downstream_nodes", affected, MAX_NODES),
+        ):
+            if (
+                not isinstance(values, list)
+                or len(values) > limit
+                or not all(
+                    isinstance(value, str) and value.strip() and len(value) <= MAX_TEXT
+                    for value in values
+                )
+            ):
+                raise HarnessError(
+                    f"node {node_id} verification {field} must be a unique string list"
+                )
+            if len(set(values)) != len(values):
+                raise HarnessError(
+                    f"node {node_id} verification {field} must be a unique string list"
+                )
+        if not set(checked).issubset(expected) or not set(failed).issubset(expected):
+            raise HarnessError(
+                f"node {node_id} verification references unknown criteria"
+            )
+        self._validate_evidence_list(verification["evidence"], node_id)
+        reviewed = {item["criterion"] for item in verification["evidence"]}
+        if not reviewed.issubset(expected):
+            raise HarnessError(
+                f"node {node_id} verification evidence references unknown criteria"
+            )
+        faulty_criteria = verification.get("faulty_node_criteria")
+        if faulty_criteria is not None:
+            if (
+                not isinstance(faulty_criteria, list)
+                or len(faulty_criteria) > MAX_CRITERIA
+                or not all(
+                    isinstance(value, str) and value.strip() and len(value) <= MAX_TEXT
+                    for value in faulty_criteria
+                )
+            ):
+                raise HarnessError(
+                    f"node {node_id} verification faulty_node_criteria is invalid"
+                )
+            if len(set(faulty_criteria)) != len(faulty_criteria):
+                raise HarnessError(
+                    f"node {node_id} verification faulty_node_criteria is invalid"
+                )
+        if result == "pass" and (not checked or not verification["evidence"]):
+            raise HarnessError(
+                f"node {node_id} PASS verification requires criteria and evidence"
+            )
+        if result == "uncertain" and not verification["reason"]:
+            raise HarnessError(
+                f"node {node_id} UNCERTAIN verification requires a reason"
+            )
+        if result == "fail" and (
+            not verification["reason"]
+            or not verification["faulty_node"]
+            or not verification["recommendation"]
+            or not failed
+            or not faulty_criteria
+            or not verification["evidence"]
+            or not set(failed).issubset(reviewed)
+        ):
+            raise HarnessError(
+                f"node {node_id} FAIL verification is missing required evidence"
+            )
+
+    def _validate_review_history(
+        self, history: Any, node_id: str, expected: set[str]
+    ) -> None:
+        if not isinstance(history, list):
+            raise HarnessError(f"node {node_id} review_history must be a list")
+        if len(history) > MAX_EVIDENCE:
+            raise HarnessError(f"node {node_id} has too many review history entries")
+        required = {
+            "verification",
+            "submission_evidence",
+            "review_context",
+            "submitted_at",
+            "withdrawn_at",
+        }
+        for record in history:
+            if not isinstance(record, dict) or set(record) != required:
+                raise HarnessError(
+                    f"node {node_id} review_history entries must contain only "
+                    f"{sorted(required)}"
+                )
+            self._validate_verification(record["verification"], node_id, expected)
+            if record["verification"]["result"] != "uncertain":
+                raise HarnessError(
+                    f"node {node_id} review_history may contain only UNCERTAIN reviews"
+                )
+            if not isinstance(record["submission_evidence"], list):
+                raise HarnessError(
+                    f"node {node_id} review_history submission_evidence must be a list"
+                )
+            self._validate_evidence_list(record["submission_evidence"], node_id)
+            self._validate_review_context(record["review_context"], node_id)
+            for field in ("submitted_at", "withdrawn_at"):
+                timestamp = record[field]
+                if (
+                    not isinstance(timestamp, str)
+                    or not timestamp.strip()
+                    or len(timestamp) > MAX_TEXT
+                ):
+                    raise HarnessError(
+                        f"node {node_id} review_history {field} must be non-empty"
+                    )
+
     def _validate_runtime_consistency(self) -> None:
         by_id = {node["id"]: node for node in self.nodes}
         for node in self.nodes:
@@ -226,6 +392,14 @@ class Graph:
                     )
                 if node["attempts"] < 1:
                     raise HarnessError(f"active node {node['id']} has no attempt")
+            verification = node.get("verification")
+            if node["status"] == "running" and verification is not None:
+                raise HarnessError(f"running node {node['id']} cannot have a review")
+            if node["status"] == "awaiting_verification" and verification is not None:
+                if verification["result"] != "uncertain":
+                    raise HarnessError(
+                        f"awaiting node {node['id']} may retain only an UNCERTAIN review"
+                    )
             if node["status"] in {"running", "awaiting_verification"} and not node.get(
                 "executor_id"
             ):
@@ -312,7 +486,7 @@ class Graph:
         if status not in STATUSES:
             raise HarnessError(f"invalid status: {status}")
         raise HarnessError(
-            "direct transitions are forbidden; use start/submit/verify/retry"
+            "direct transitions are forbidden; use start/submit/verify/withdraw/retry"
         )
 
     def start(self, node_id: str, executor_id: str | None = None) -> None:
@@ -340,6 +514,15 @@ class Graph:
     ) -> None:
         node = self.node(node_id)
         if node["status"] != "running":
+            if (
+                node["status"] == "awaiting_verification"
+                and str((node.get("verification") or {}).get("result", "")).lower()
+                == "uncertain"
+            ):
+                raise HarnessError(
+                    f"cannot submit {node_id} from awaiting_verification; "
+                    "withdraw the uncertain submission first"
+                )
             raise HarnessError(f"cannot submit {node_id} from {node['status']}")
         items: list[dict[str, Any]] = [copy.deepcopy(dict(item)) for item in evidence]
         items = self._normalize_evidence(items, node)
@@ -386,18 +569,32 @@ class Graph:
         self._require_non_empty(reviewer_id, "reviewer_id")
         if reviewer_id == node.get("executor_id"):
             raise HarnessError("reviewer must be independent from executor")
-        checked = list(checked_criteria or node["acceptance_criteria"])
+        if result == "pass" and checked_criteria is None:
+            raise HarnessError(
+                "PASS requires explicit checked criteria from the reviewer"
+            )
+        if result in {"pass", "fail"} and review_evidence is None:
+            raise HarnessError(
+                f"{result.upper()} requires explicit review evidence from the reviewer"
+            )
+        failed = list(failed_criteria or [])
+        if checked_criteria is None:
+            checked = list(failed) if result == "fail" else []
+        else:
+            checked = list(checked_criteria)
         if len(set(checked)) != len(checked):
             raise HarnessError("checked criteria must be unique")
         expected = set(node["acceptance_criteria"])
         if not set(checked).issubset(expected):
             raise HarnessError("review references unknown acceptance criteria")
-        failed = list(failed_criteria or [])
         if len(set(failed)) != len(failed) or not set(failed).issubset(expected):
             raise HarnessError("failed criteria must be unique acceptance criteria")
         faulty_failed = list(faulty_criteria or [])
+        review_source: Iterable[Mapping[str, Any]] = (
+            () if review_evidence is None else review_evidence
+        )
         review_items = self._normalize_evidence(
-            copy.deepcopy(list(review_evidence or node["evidence"])), node
+            copy.deepcopy(list(review_source)), node
         )
         self._validate_evidence_list(review_items, node_id)
         review_covered = {item["criterion"] for item in review_items}
@@ -508,6 +705,41 @@ class Graph:
         self.validate()
         return invalidated
 
+    def withdraw_submission(self, node_id: str, actor_id: str) -> None:
+        """Return an UNCERTAIN submission to its executor without a new attempt."""
+
+        node = self.node(node_id)
+        if node["status"] != "awaiting_verification":
+            raise HarnessError(
+                f"cannot withdraw {node_id} from {node['status']}; "
+                "only an UNCERTAIN submission can be withdrawn"
+            )
+        verification = node.get("verification")
+        if (
+            not isinstance(verification, dict)
+            or str(verification.get("result", "")).lower() != "uncertain"
+        ):
+            raise HarnessError("only an UNCERTAIN submission can be withdrawn")
+        self._require_non_empty(actor_id, "actor_id")
+        if actor_id != node.get("executor_id"):
+            raise HarnessError("actor_id must match the executor that started the node")
+        submitted_at = node.get("submitted_at")
+        self._require_non_empty(submitted_at, "submitted_at")
+        node.setdefault("review_history", []).append(
+            {
+                "verification": copy.deepcopy(verification),
+                "submission_evidence": copy.deepcopy(node["evidence"]),
+                "review_context": copy.deepcopy(node.get("review_context", {})),
+                "submitted_at": submitted_at,
+                "withdrawn_at": utc_now(),
+            }
+        )
+        node["verification"] = None
+        node.pop("reviewer_id", None)
+        node.pop("submitted_at", None)
+        node["status"] = "running"
+        self.validate()
+
     def retry(self, node_id: str) -> str:
         node = self.node(node_id)
         if node["status"] not in {"failed", "invalidated"}:
@@ -582,10 +814,42 @@ class Graph:
                     "attempts": node["attempts"],
                     "max_attempts": node["max_attempts"],
                     "failure_reason": node["failure_reason"],
+                    "next_action": self._next_action(node),
                 }
                 for node in self.nodes
             ],
         }
+
+    def _next_action(self, node: Mapping[str, Any]) -> str | None:
+        node_id = node["id"]
+        status = node["status"]
+        if status == "blocked":
+            pending = [
+                dependency
+                for dependency in node["depends_on"]
+                if self.node(dependency)["status"] != "verified"
+            ]
+            return f"wait for dependencies: {', '.join(pending)}"
+        if status == "ready":
+            return f"start {node_id}"
+        if status == "running":
+            return f"submit {node_id} with executor evidence"
+        if status == "awaiting_verification":
+            verification = node.get("verification")
+            if (
+                isinstance(verification, Mapping)
+                and str(verification.get("result", "")).lower() == "uncertain"
+            ):
+                return (
+                    f"withdraw {node_id} as the executor, then submit replacement "
+                    "evidence"
+                )
+            return f"verify {node_id} with an independent reviewer"
+        if status in {"failed", "invalidated"}:
+            if node["attempts"] >= node["max_attempts"]:
+                return "manual intervention required; max_attempts reached"
+            return f"retry {node_id}"
+        return None
 
     def failure_records(
         self,

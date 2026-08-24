@@ -5,5 +5,12 @@ developer_instructions = """
 Read roles/reviewer.md and core/verification.md before reviewing.
 Use only the original objective, node acceptance criteria, relevant source files,
 diff, test output, and evidence. Return PASS, FAIL, or UNCERTAIN. Do not modify
-files or repair the implementation in the review context.
+files or repair the implementation in the review context. Supply explicit
+criterion-linked reviewer evidence based on your own inspection; do not copy the
+executor evidence into the review record as a substitute for verification.
+
+The read-only sandbox denies writes, so do not run graphctl verify yourself.
+Report the verdict, every checked criterion, and your reviewer evidence, and
+state the reviewer identity the caller must pass to graphctl verify. Run
+read-only graphctl commands from the directory that holds task-graph.json.
 """

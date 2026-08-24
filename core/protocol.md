@@ -11,9 +11,12 @@ nodes. A separate reviewer receives a compact review packet and records
 2. Start a `ready` node with an executor identity.
 3. Submit current-attempt evidence mapped to acceptance criteria.
 4. Give `graphctl review-packet NODE` to an independent reviewer.
-5. Record the verdict with `graphctl verify`.
-6. On failure, retry the faulty node and only its invalidated descendants.
-7. Treat the objective as complete only when `completion-check` succeeds.
+5. Record the verdict with `graphctl verify`, including explicit reviewer
+   criteria and evidence for PASS or FAIL.
+6. On UNCERTAIN, let the original executor withdraw the submission, strengthen
+   its evidence, and submit again without opening a new attempt.
+7. On failure, retry the faulty node and only its invalidated descendants.
+8. Treat the objective as complete only when `completion-check` succeeds.
 
 Agents must not edit status, attempts, verification, or failure history directly.
 Canonical graph files are JSON. JSON is a YAML 1.2 subset, but v1 intentionally

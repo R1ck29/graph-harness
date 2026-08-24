@@ -70,7 +70,11 @@ class GraphStore:
             with self.path.open("r", encoding="utf-8") as handle:
                 document = json.load(handle)
         except FileNotFoundError as exc:
-            raise HarnessError(f"graph file not found: {self.path}") from exc
+            raise HarnessError(
+                f"graph file not found: {self.path}; run the command from the "
+                "directory that holds the graph, or create one with "
+                "'graphctl init'"
+            ) from exc
         except (json.JSONDecodeError, RecursionError) as exc:
             raise HarnessError(f"invalid JSON in {self.path}: {exc}") from exc
         if not isinstance(document, dict):
