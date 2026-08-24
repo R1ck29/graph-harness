@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/graph-engineering/task-graph.schema.json",
+  "title": "Graph Engineering Task Graph v1",
+  "type": "object",
+  "required": ["version", "objective", "nodes"],
+  "properties": {
+    "version": {"const": 1},
+    "objective": {"type": "string", "minLength": 1},
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/node"}
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "evidence": {
+      "type": "object",
+      "required": ["criterion", "kind", "summary"],
+      "properties": {
+        "criterion": {"type": "string", "minLength": 1},
+        "kind": {"type": "string", "minLength": 1},
+        "summary": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": true
+    },
+    "node": {
+      "type": "object",
+      "required": [
+        "id", "description", "status", "depends_on", "assigned_role",
+        "acceptance_criteria", "evidence", "attempts", "max_attempts",
+        "failure_reason"
+      ],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+        "description": {"type": "string", "minLength": 1},
+        "status": {
+          "enum": ["blocked", "ready", "running", "awaiting_verification", "verified", "failed", "invalidated"]
+        },
+        "depends_on": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+        "assigned_role": {"type": "string", "minLength": 1},
+        "acceptance_criteria": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"}},
+        "attempts": {"type": "integer", "minimum": 0},
+        "max_attempts": {"type": "integer", "minimum": 1},
+        "failure_reason": {"type": ["string", "null"]},
+        "executor_id": {"type": ["string", "null"]},
+        "verification": {"type": ["object", "null"]},
+        "failure_history": {"type": "array"},
+        "attempt_history": {"type": "array"},
+        "review_context": {
+          "type": "object",
+          "properties": {
+            "relevant_files": {"type": "array", "items": {"type": "string"}},
+            "diff_artifact": {"type": ["string", "null"]},
+            "test_output_artifact": {"type": ["string", "null"]}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

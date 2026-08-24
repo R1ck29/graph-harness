@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "objective": "Add a small feature with independent verification.",
+  "nodes": [
+    {
+      "id": "plan",
+      "description": "Confirm the change boundary and test strategy.",
+      "status": "blocked",
+      "depends_on": [],
+      "assigned_role": "planner",
+      "acceptance_criteria": ["affected behavior and files are identified"],
+      "evidence": [],
+      "attempts": 0,
+      "max_attempts": 2,
+      "failure_reason": null
+    },
+    {
+      "id": "implement",
+      "description": "Implement the feature and its tests.",
+      "status": "blocked",
+      "depends_on": ["plan"],
+      "assigned_role": "implementer",
+      "acceptance_criteria": ["focused tests pass", "no unrelated files changed"],
+      "evidence": [],
+      "attempts": 0,
+      "max_attempts": 2,
+      "failure_reason": null
+    }
+  ]
+}

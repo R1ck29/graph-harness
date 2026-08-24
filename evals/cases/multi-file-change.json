@@ -1,0 +1,15 @@
+{
+  "id": "multi-file-change",
+  "objective": "Make a coordinated API and documentation change across files.",
+  "failure_node": "api",
+  "task_graph": {
+    "version": 1,
+    "objective": "Update an API, its caller, tests, and documentation.",
+    "nodes": [
+      {"id":"plan","description":"Map the API and consumers","status":"blocked","depends_on":[],"assigned_role":"planner","acceptance_criteria":["all consumers are identified"],"evidence":[],"attempts":0,"max_attempts":2,"failure_reason":null},
+      {"id":"api","description":"Change the API contract","status":"blocked","depends_on":["plan"],"assigned_role":"implementer","acceptance_criteria":["API tests pass"],"evidence":[],"attempts":0,"max_attempts":2,"failure_reason":null},
+      {"id":"caller","description":"Update all callers","status":"blocked","depends_on":["api"],"assigned_role":"implementer","acceptance_criteria":["caller tests pass"],"evidence":[],"attempts":0,"max_attempts":2,"failure_reason":null},
+      {"id":"docs","description":"Update the public documentation","status":"blocked","depends_on":["api"],"assigned_role":"specialist","acceptance_criteria":["examples match the API"],"evidence":[],"attempts":0,"max_attempts":2,"failure_reason":null}
+    ]
+  }
+}

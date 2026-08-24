@@ -1,0 +1,15 @@
+{
+  "id": "upstream-invalidates-descendants",
+  "objective": "Detect an upstream contract error and rerun only affected descendants.",
+  "failure_node": "contract",
+  "task_graph": {
+    "version": 1,
+    "objective": "Build and verify a three-stage change with an unrelated branch.",
+    "nodes": [
+      {"id":"contract","description":"Define the data contract","status":"blocked","depends_on":[],"assigned_role":"planner","acceptance_criteria":["contract covers nullable values"],"evidence":[],"attempts":0,"max_attempts":2,"failure_reason":null},
+      {"id":"producer","description":"Implement the producer","status":"blocked","depends_on":["contract"],"assigned_role":"implementer","acceptance_criteria":["producer contract tests pass"],"evidence":[],"attempts":0,"max_attempts":2,"failure_reason":null},
+      {"id":"consumer","description":"Implement the consumer","status":"blocked","depends_on":["producer"],"assigned_role":"implementer","acceptance_criteria":["consumer contract tests pass"],"evidence":[],"attempts":0,"max_attempts":2,"failure_reason":null},
+      {"id":"unrelated-docs","description":"Refresh unrelated operator notes","status":"blocked","depends_on":[],"assigned_role":"specialist","acceptance_criteria":["notes remain accurate"],"evidence":[],"attempts":0,"max_attempts":2,"failure_reason":null}
+    ]
+  }
+}

@@ -1,0 +1,16 @@
+[project]
+name = "graph-engineering-agent-harness"
+version = "0.1.0"
+description = "A vendor-neutral task graph harness for coding agents"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+[project.scripts]
+graphctl = "agent_harness.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["agent_harness"]

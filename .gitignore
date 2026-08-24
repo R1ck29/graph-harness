@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+.code-review-graph/
+.coverage
+/task-graph.json
+evals/results/*.json
+!evals/results/.gitkeep
+.DS_Store

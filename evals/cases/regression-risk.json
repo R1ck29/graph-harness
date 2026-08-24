@@ -1,0 +1,14 @@
+{
+  "id": "regression-risk",
+  "objective": "Change shared behavior while protecting a sensitive edge case.",
+  "failure_node": "shared-change",
+  "task_graph": {
+    "version": 1,
+    "objective": "Update shared behavior with explicit regression coverage.",
+    "nodes": [
+      {"id":"risk-map","description":"Identify affected paths and edge cases","status":"blocked","depends_on":[],"assigned_role":"planner","acceptance_criteria":["regression risks are enumerated"],"evidence":[],"attempts":0,"max_attempts":2,"failure_reason":null},
+      {"id":"shared-change","description":"Implement the shared change","status":"blocked","depends_on":["risk-map"],"assigned_role":"implementer","acceptance_criteria":["new behavior passes","legacy edge case passes"],"evidence":[],"attempts":0,"max_attempts":2,"failure_reason":null},
+      {"id":"integration","description":"Run integration verification","status":"blocked","depends_on":["shared-change"],"assigned_role":"reviewer","acceptance_criteria":["integration suite passes"],"evidence":[],"attempts":0,"max_attempts":2,"failure_reason":null}
+    ]
+  }
+}

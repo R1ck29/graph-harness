@@ -1,0 +1,14 @@
+{
+  "id": "test-failure-repair",
+  "objective": "Diagnose and repair an existing test failure without weakening the test.",
+  "failure_node": "diagnose",
+  "task_graph": {
+    "version": 1,
+    "objective": "Restore the failing test by fixing its root cause.",
+    "nodes": [
+      {"id":"reproduce","description":"Run the narrow failing test","status":"blocked","depends_on":[],"assigned_role":"specialist","acceptance_criteria":["failure is reproduced"],"evidence":[],"attempts":0,"max_attempts":2,"failure_reason":null},
+      {"id":"diagnose","description":"Identify the root cause","status":"blocked","depends_on":["reproduce"],"assigned_role":"planner","acceptance_criteria":["root cause explains the failure"],"evidence":[],"attempts":0,"max_attempts":2,"failure_reason":null},
+      {"id":"repair","description":"Implement the root-cause fix","status":"blocked","depends_on":["diagnose"],"assigned_role":"implementer","acceptance_criteria":["original and related tests pass"],"evidence":[],"attempts":0,"max_attempts":2,"failure_reason":null}
+    ]
+  }
+}

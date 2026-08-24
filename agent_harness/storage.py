@@ -1,0 +1,110 @@
+"""Atomic JSON storage and append-only failure memory."""
+
+from __future__ import annotations
+
+import json
+import os
+import stat
+import tempfile
+import time
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Callable, Iterator
+
+from .errors import HarnessError
+from .graph import Graph
+
+MAX_GRAPH_BYTES = 4 * 1024 * 1024
+
+
+class FileLock:
+    """Small cross-platform lock based on exclusive file creation."""
+
+    def __init__(self, path: Path, timeout: float = 5.0):
+        self.path = path
+        self.timeout = timeout
+        self._fd: int | None = None
+        self._identity: tuple[int, int] | None = None
+
+    def __enter__(self) -> "FileLock":
+        deadline = time.monotonic() + self.timeout
+        while True:
+            try:
+                flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+                flags |= getattr(os, "O_NOFOLLOW", 0)
+                self._fd = os.open(self.path, flags, 0o600)
+                info = os.fstat(self._fd)
+                self._identity = (info.st_dev, info.st_ino)
+                os.write(self._fd, f"{os.getpid()}\n".encode("ascii"))
+                return self
+            except FileExistsError as exc:
+                if time.monotonic() >= deadline:
+                    raise HarnessError(
+                        f"timed out waiting for lock: {self.path}"
+                    ) from exc
+                time.sleep(0.05)
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        if self._fd is not None:
+            os.close(self._fd)
+        try:
+            current = self.path.lstat()
+            identity = (current.st_dev, current.st_ino)
+            if self._identity == identity and stat.S_ISREG(current.st_mode):
+                self.path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+class GraphStore:
+    """Load and mutate a graph without exposing partial writes."""
+
+    def __init__(self, path: str | os.PathLike[str]):
+        self.path = Path(path)
+        self.lock_path = self.path.with_suffix(self.path.suffix + ".lock")
+
+    def load(self) -> Graph:
+        try:
+            if self.path.stat().st_size > MAX_GRAPH_BYTES:
+                raise HarnessError(f"graph file exceeds {MAX_GRAPH_BYTES} bytes")
+            with self.path.open("r", encoding="utf-8") as handle:
+                document = json.load(handle)
+        except FileNotFoundError as exc:
+            raise HarnessError(f"graph file not found: {self.path}") from exc
+        except (json.JSONDecodeError, RecursionError) as exc:
+            raise HarnessError(f"invalid JSON in {self.path}: {exc}") from exc
+        if not isinstance(document, dict):
+            raise HarnessError("graph document must be a JSON object")
+        return Graph(document)
+
+    def save(self, graph: Graph) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        rendered = json.dumps(graph.to_dict(), indent=2, sort_keys=False) + "\n"
+        if len(rendered.encode("utf-8")) > MAX_GRAPH_BYTES:
+            raise HarnessError(f"graph file exceeds {MAX_GRAPH_BYTES} bytes")
+        descriptor, temp_name = tempfile.mkstemp(
+            prefix=f".{self.path.name}.", suffix=".tmp", dir=self.path.parent
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(rendered)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_name, self.path)
+        finally:
+            try:
+                os.unlink(temp_name)
+            except FileNotFoundError:
+                pass
+
+    @contextmanager
+    def transaction(self) -> Iterator[Graph]:
+        with FileLock(self.lock_path):
+            graph = self.load()
+            yield graph
+            graph.validate()
+            self.save(graph)
+
+    def mutate(self, operation: Callable[[Graph], Any]) -> Any:
+        with self.transaction() as graph:
+            return operation(graph)

@@ -1,0 +1,14 @@
+{
+  "id": "simple-bug-fix",
+  "objective": "Fix an off-by-one defect and preserve neighboring behavior.",
+  "failure_node": "implement",
+  "task_graph": {
+    "version": 1,
+    "objective": "Fix the defect with a regression test.",
+    "nodes": [
+      {"id":"plan","description":"Reproduce and localize the defect","status":"blocked","depends_on":[],"assigned_role":"planner","acceptance_criteria":["reproduction is recorded"],"evidence":[],"attempts":0,"max_attempts":2,"failure_reason":null},
+      {"id":"implement","description":"Apply the minimal fix and test","status":"blocked","depends_on":["plan"],"assigned_role":"implementer","acceptance_criteria":["regression test passes"],"evidence":[],"attempts":0,"max_attempts":2,"failure_reason":null},
+      {"id":"review","description":"Independently verify the behavior","status":"blocked","depends_on":["implement"],"assigned_role":"reviewer","acceptance_criteria":["requested behavior is verified"],"evidence":[],"attempts":0,"max_attempts":2,"failure_reason":null}
+    ]
+  }
+}
