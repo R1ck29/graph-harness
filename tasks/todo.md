@@ -12,7 +12,7 @@ Started: 2026-08-25
 - [x] Add five portable eval cases, offline comparison runner, README, and integration guide.
 - [x] Run all tests, offline evals, adapter validation, formatting/static checks, and secret scans.
 - [x] Obtain an independent code/security review and resolve all critical/high findings.
-- [ ] Create and push the public GitHub repository, then verify the remote commit and visibility.
+- [x] Create and push the public GitHub repository, then verify the remote commit and visibility.
 
 ## Review
 
@@ -26,3 +26,4 @@ Started: 2026-08-25
 - Failure memory is graph-resident so state and diagnosis commit atomically.
 - Known operational limit: after confirming no writer is active, a crash-stale
   graph lock must be removed manually as documented in `docs/security.md`.
+- Published publicly at `https://github.com/R1ck29/agent-harness` on `main`.
