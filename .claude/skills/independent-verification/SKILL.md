@@ -18,8 +18,10 @@ client and adapter directories are generated; do not edit them directly.
    descendants, and minimal retry recommendation. If the faulty node is an
    ancestor, also map the failure to that node's acceptance criterion.
 6. Record the verdict through `graphctl verify`; do not edit implementation.
-   When the client's permission mode denies the reviewer that write, report the
-   verdict, checked criteria, and reviewer evidence to the caller and have the
-   caller record them verbatim under the reviewer identity.
+   When the reviewer runs as a delegated review context, it reports the verdict,
+   checked criteria, and reviewer evidence instead, and the caller records them
+   verbatim under the reviewer identity. Apply this whenever the reviewer is a
+   subagent, even if its tools would technically permit the write: a self-issued
+   review record defeats the separation this step exists to create.
 7. Run `graphctl` from the directory that holds `task-graph.json`; a graph in a
    parent directory is rejected as outside the workspace.

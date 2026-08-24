@@ -54,8 +54,13 @@ Local version: `2.1.239 (Claude Code)`.
   worktree; keep graph commands in the primary checkout.
 - Agent frontmatter honors `tools`, `permissionMode`, and `disallowedTools`,
   but this release documents that `disallowedTools` is ignored while `tools` is
-  set. The reviewer therefore relies on its `tools` list, and its plan
-  permission mode refuses writes, which is why the caller records the verdict.
+  set, so the reviewer relies on its `tools` list.
+- Plan mode refuses the `Write` and `Edit` tools but does not stop a shell
+  redirect. A probe of the project reviewer on 2026-08-25 wrote a file through
+  `Bash` with no permission prompt, on a machine whose settings allow `Bash`
+  broadly. No subagent tool restriction here is a security boundary; the
+  caller records the verdict by convention, not because the client blocks the
+  reviewer from recording it.
 - Plugin packaging is supported, but v1 uses project-scoped standalone config
   to stay small. The canonical `skills/` tree can later be put in a plugin
   without changing core semantics.

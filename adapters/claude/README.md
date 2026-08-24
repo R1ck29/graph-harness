@@ -5,17 +5,18 @@ generated skills under `.claude/skills/`, and exposes the project reviewer at
 `.claude/agents/reviewer.md`.
 
 The reviewer's `tools` list omits `Write`, `Edit`, and `NotebookEdit`, and plan
-permission mode blocks file writes. It keeps `Bash` to inspect sources and run
-tests, so it is a review posture rather than an enforced sandbox; the operating
-environment supplies the real boundary. `disallowedTools` is kept as a fallback
-for anyone who removes the `tools` list, but Claude Code ignores it while
-`tools` is set.
+permission mode refuses those tools. It keeps `Bash` to inspect sources and run
+tests, and plan mode does not stop a shell redirect: a probe of this adapter's
+own reviewer wrote a file through `Bash` with no prompt. Treat the reviewer as a
+review posture, never as a sandbox. Only the operating environment supplies a
+real boundary. `disallowedTools` is kept as a fallback for anyone who removes
+the `tools` list, but Claude Code ignores it while `tools` is set.
 
-Because plan mode refuses writes, the reviewer reports its verdict, criteria,
-and evidence to the caller instead of writing the graph itself. The caller
-records it verbatim with `graphctl verify` using the reviewer identity. Under a
-client that lets the reviewer run its own writes, let the reviewer call
-`graphctl verify` directly.
+The reviewer therefore reports its verdict, criteria, and evidence to the
+caller, and the caller records them verbatim with `graphctl verify` under the
+reviewer identity. This is a rule the reviewer follows, not a restriction the
+client enforces, so an operator who needs enforcement must supply a sandboxed
+review context.
 
 Run `graphctl` from the directory holding `task-graph.json`. The workspace is
 the current directory, so a graph in a parent directory is rejected as outside

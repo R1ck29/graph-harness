@@ -15,6 +15,15 @@ or agent actually performed the review. A PASS requires reviewer-supplied
 criteria and evidence, but the surrounding platform must enforce the fresh
 context and read-only reviewer boundary.
 
+A subagent tool list is not that boundary. Removing `Write` and `Edit` from a
+reviewer still leaves `Bash`, which can write through a shell redirect; a probe
+of the Claude reviewer on 2026-08-25 did exactly that with no permission
+prompt, under plan permission mode. The bundled reviewers keep `Bash` so they
+can read sources and run tests, and they are instructed not to record their own
+verdict. Where a forged self-review is part of the threat model, run the
+reviewer under an OS-level or container sandbox, or a separate account, rather
+than relying on agent configuration.
+
 Generated adapter trees reject symlinks and link-like Windows reparse points and
 must exactly match canonical skills. Claude hooks are opt-in because enabling a
 project hook executes local repository code. The example hook has no network
