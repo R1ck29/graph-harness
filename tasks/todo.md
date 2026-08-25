@@ -208,3 +208,33 @@ independently before any fix.
 Not done: no Codex session was run. `codex doctor` reports no warnings and the
 reviewer config's field names appear in the Codex binary, but that is evidence
 the configuration is well formed, not proof a review round-trips.
+
+### Remaining review findings closed (2026-08-25)
+
+The previous commit fixed four of seven findings. The rest are now closed; each
+was reproduced first.
+
+- A verdict recorded straight over an UNCERTAIN review destroyed it. `withdraw`
+  archived the doubt into `review_history`, but `verify` overwrote it, so a node
+  read as a clean single-review PASS with the reviewer's stated uncertainty gone
+  and unrecoverable. All three verdict paths now go through
+  `_record_verification`, which archives a superseded UNCERTAIN using the same
+  record shape. It runs only after every check passes, so a rejected verdict
+  still archives nothing.
+- `submit` wrote the new evidence before validating `actor_id`, so a rejected
+  call left the attacker's evidence on a still-`running` node. The CLI was safe
+  because it never saves a failed transaction, but `Graph` is public API and a
+  rejected operation must be a no-op. Identity and context checks now precede
+  every mutation.
+- Reopening a verified ancestor left its PASS attached, so a `failed` node
+  carried a passing verdict until someone called `retry`. The reopened ancestor
+  now loses `verification`, `reviewer_id`, and `verified_at`. A node that faults
+  itself keeps its FAIL record.
+- Three CLI tests only passed when run from the repository root, because the CLI
+  confines paths to the current directory. CI always runs from the root, which
+  hid it. `GraphCtlAtomicityTests` now pins the working directory, and the suite
+  passes from an unrelated directory.
+- 90 tests pass on Python 3.11 and 3.8.5, from the repository root and from an
+  unrelated directory, plus Black, mypy over 18 files, adapter drift,
+  compileall, five offline eval cases, and a clean-install quick start. Each of
+  the three fixes was mutation-checked.

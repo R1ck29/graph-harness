@@ -736,3 +736,144 @@ class UpstreamInvalidationBudgetTests(unittest.TestCase):
         self.assertEqual(2, task_graph.node("solo")["attempts"])
         with self.assertRaisesRegex(HarnessError, "max_attempts"):
             task_graph.retry("solo")
+
+
+class VerificationRecordIntegrityTests(unittest.TestCase):
+    """A rejected call changes nothing, and recorded doubt is not erasable."""
+
+    def _awaiting(self) -> Graph:
+        task_graph = Graph.from_dict(graph(node("solo")))
+        task_graph.start("solo", executor_id="e1")
+        task_graph.submit(
+            "solo", [{"kind": "test", "summary": "implemented"}], actor_id="e1"
+        )
+        return task_graph
+
+    def test_a_pass_over_an_uncertain_preserves_the_uncertain_review(self) -> None:
+        task_graph = self._awaiting()
+        task_graph.verify("solo", "uncertain", "r1", reason="evidence too thin")
+
+        task_graph.verify(
+            "solo",
+            "pass",
+            "r2",
+            checked_criteria=["relevant tests pass"],
+            review_evidence=[{"kind": "independent_test", "summary": "reran"}],
+        )
+
+        history = task_graph.node("solo")["review_history"]
+        self.assertEqual(1, len(history))
+        self.assertEqual("uncertain", history[0]["verification"]["result"])
+        self.assertEqual("evidence too thin", history[0]["verification"]["reason"])
+        self.assertEqual("pass", task_graph.node("solo")["verification"]["result"])
+
+    def test_a_fail_over_an_uncertain_preserves_the_uncertain_review(self) -> None:
+        task_graph = self._awaiting()
+        task_graph.verify("solo", "uncertain", "r1", reason="cannot tell yet")
+
+        task_graph.verify(
+            "solo",
+            "fail",
+            "r2",
+            reason="the suite is red",
+            failed_criteria=["relevant tests pass"],
+            review_evidence=[{"kind": "test", "summary": "reviewer saw a failure"}],
+        )
+
+        history = task_graph.node("solo")["review_history"]
+        self.assertEqual(
+            ["cannot tell yet"], [r["verification"]["reason"] for r in history]
+        )
+
+    def test_a_rejected_verdict_archives_nothing(self) -> None:
+        task_graph = self._awaiting()
+        task_graph.verify("solo", "uncertain", "r1", reason="cannot tell yet")
+
+        with self.assertRaises(HarnessError):
+            task_graph.verify(
+                "solo",
+                "pass",
+                "r2",
+                checked_criteria=["relevant tests pass"],
+            )
+
+        solo = task_graph.node("solo")
+        self.assertEqual([], solo.get("review_history", []))
+        self.assertEqual("uncertain", solo["verification"]["result"])
+
+    def test_a_rejected_submit_leaves_the_previous_evidence_intact(self) -> None:
+        task_graph = Graph.from_dict(graph(node("solo")))
+        task_graph.start("solo", executor_id="e1")
+        task_graph.node("solo")["evidence"] = [
+            {"kind": "test", "summary": "GOOD", "criterion": "relevant tests pass"}
+        ]
+
+        with self.assertRaisesRegex(HarnessError, "actor_id must match"):
+            task_graph.submit(
+                "solo", [{"kind": "test", "summary": "ATTACKER"}], actor_id="intruder"
+            )
+
+        solo = task_graph.node("solo")
+        self.assertEqual("GOOD", solo["evidence"][0]["summary"])
+        self.assertEqual("running", solo["status"])
+
+    def test_a_rejected_submit_leaves_the_previous_review_context(self) -> None:
+        task_graph = Graph.from_dict(graph(node("solo")))
+        task_graph.start("solo", executor_id="e1")
+        task_graph.node("solo")["review_context"] = {"relevant_files": ["kept.py"]}
+
+        with self.assertRaises(HarnessError):
+            task_graph.submit(
+                "solo",
+                [{"kind": "test", "summary": "new"}],
+                actor_id="intruder",
+                review_context={"relevant_files": ["clobbered.py"]},
+            )
+
+        self.assertEqual(
+            ["kept.py"], task_graph.node("solo")["review_context"]["relevant_files"]
+        )
+
+    def test_a_reopened_ancestor_does_not_keep_its_passing_review(self) -> None:
+        task_graph = Graph.from_dict(
+            graph(node("root", status="verified"), node("leaf", depends_on=["root"]))
+        )
+        self.assertEqual("pass", task_graph.node("root")["verification"]["result"])
+        task_graph.start("leaf", executor_id="leaf-executor")
+        task_graph.submit(
+            "leaf", [{"kind": "test", "summary": "built"}], actor_id="leaf-executor"
+        )
+
+        task_graph.verify(
+            "leaf",
+            "fail",
+            "leaf-reviewer",
+            reason="root produced a broken contract",
+            faulty_node="root",
+            failed_criteria=["relevant tests pass"],
+            faulty_criteria=["relevant tests pass"],
+            review_evidence=[{"kind": "test", "summary": "traced upstream"}],
+        )
+
+        root = task_graph.node("root")
+        self.assertEqual("failed", root["status"])
+        self.assertIsNone(root["verification"])
+        self.assertNotIn("reviewer_id", root)
+        self.assertNotIn("verified_at", root)
+        self.assertEqual("ready", task_graph.retry("root"))
+
+    def test_a_self_faulted_node_keeps_its_failing_review(self) -> None:
+        task_graph = self._awaiting()
+
+        task_graph.verify(
+            "solo",
+            "fail",
+            "r1",
+            reason="the suite is red",
+            failed_criteria=["relevant tests pass"],
+            review_evidence=[{"kind": "test", "summary": "reviewer saw a failure"}],
+        )
+
+        solo = task_graph.node("solo")
+        self.assertEqual("failed", solo["status"])
+        self.assertEqual("fail", solo["verification"]["result"])

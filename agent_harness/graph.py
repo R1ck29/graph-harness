@@ -524,6 +524,15 @@ class Graph:
                     "withdraw the uncertain submission first"
                 )
             raise HarnessError(f"cannot submit {node_id} from {node['status']}")
+        # Validate everything before touching the node. A rejected submit must
+        # leave the previous evidence intact, so the identity and context checks
+        # cannot sit between two mutations.
+        if actor_id is not None:
+            self._require_non_empty(actor_id, "actor_id")
+            if not self._same_actor(actor_id, node.get("executor_id")):
+                raise HarnessError(
+                    "actor_id must match the executor that started the node"
+                )
         items: list[dict[str, Any]] = [copy.deepcopy(dict(item)) for item in evidence]
         items = self._normalize_evidence(items, node)
         self._validate_evidence_list(items, node_id)
@@ -533,15 +542,9 @@ class Graph:
             raise HarnessError(
                 f"evidence references unknown criteria: {sorted(unknown)}"
             )
-        node["evidence"] = items
-        if actor_id is not None:
-            self._require_non_empty(actor_id, "actor_id")
-            if not self._same_actor(actor_id, node.get("executor_id")):
-                raise HarnessError(
-                    "actor_id must match the executor that started the node"
-                )
         context = dict(review_context or {})
         self._validate_review_context(context, node_id)
+        node["evidence"] = items
         node["review_context"] = context
         node["status"] = "awaiting_verification"
         node["submitted_at"] = utc_now()
@@ -627,7 +630,7 @@ class Graph:
                 raise HarnessError(
                     "PASS requires submission and review evidence for every criterion"
                 )
-            node["verification"] = review
+            self._record_verification(node, review)
             node["reviewer_id"] = reviewer_id
             node["status"] = "verified"
             node["failure_reason"] = None
@@ -639,7 +642,7 @@ class Graph:
         self._require_non_empty(reason, "reason")
         review["reason"] = reason
         if result == "uncertain":
-            node["verification"] = review
+            self._record_verification(node, review)
             self.validate()
             return []
 
@@ -679,9 +682,16 @@ class Graph:
             or f"Retry {faulty} with evidence addressing the failed criteria."
         )
         review["recommendation"] = recommendation
-        node["verification"] = review
+        self._record_verification(node, review)
         faulty_task["status"] = "failed"
         faulty_task["failure_reason"] = reason
+        if faulty != node_id:
+            # Reopening a verified ancestor withdraws the PASS that made it
+            # verified. Leaving that review attached would show a failed node
+            # still carrying a passing verdict until someone calls retry.
+            faulty_task["verification"] = None
+            faulty_task.pop("reviewer_id", None)
+            faulty_task.pop("verified_at", None)
         failure = {
             "event_id": f"{faulty}:{faulty_task['attempts']}",
             "node": faulty,
@@ -925,6 +935,34 @@ class Graph:
     def _require_non_empty(value: Any, label: str) -> None:
         if not isinstance(value, str) or not value.strip():
             raise HarnessError(f"{label} must be a non-empty string")
+
+    @staticmethod
+    def _record_verification(node: dict[str, Any], review: dict[str, Any]) -> None:
+        """Attach *review*, preserving an UNCERTAIN verdict it supersedes.
+
+        `withdraw` archives an UNCERTAIN review so the recorded doubt survives
+        resubmission. A verdict recorded straight over one has to do the same,
+        or a reviewer's stated uncertainty disappears from the audit trail and
+        the node reads as a clean single-review decision. Call this only after
+        every check has passed, so a rejected verdict stays a no-op.
+        """
+
+        previous = node.get("verification")
+        if (
+            isinstance(previous, dict)
+            and previous.get("result") == "uncertain"
+            and isinstance(node.get("submitted_at"), str)
+        ):
+            node.setdefault("review_history", []).append(
+                {
+                    "verification": copy.deepcopy(previous),
+                    "submission_evidence": copy.deepcopy(node["evidence"]),
+                    "review_context": copy.deepcopy(node.get("review_context", {})),
+                    "submitted_at": node["submitted_at"],
+                    "withdrawn_at": utc_now(),
+                }
+            )
+        node["verification"] = review
 
     @staticmethod
     def _identity(value: Any) -> str | None:

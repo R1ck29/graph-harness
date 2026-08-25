@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -36,6 +37,15 @@ class GraphStoreTests(unittest.TestCase):
 
 
 class GraphCtlAtomicityTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # The CLI confines every path to the current directory, and the
+        # in-process cases below build fixtures under the repository. Pin the
+        # working directory so the suite does not depend on where it is run
+        # from; CI happens to run from the root, which hid this.
+        self._previous_directory = Path.cwd()
+        os.chdir(REPOSITORY)
+        self.addCleanup(os.chdir, self._previous_directory)
+
     def _run(self, *arguments: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, str(GRAPHCTL), *arguments],
