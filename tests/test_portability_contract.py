@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib.util
+import io
 import json
 import os
 import stat
@@ -8,7 +10,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
+from typing import cast
 from unittest import mock
 
 from agent_harness.evals import load_cases, run_suite
@@ -19,6 +22,20 @@ REPOSITORY = Path(__file__).resolve().parents[1]
 SYNC = REPOSITORY / "scripts" / "sync_adapters.py"
 EVAL_RUNNER = REPOSITORY / "evals" / "runner" / "run.py"
 CLAUDE_SETTINGS = REPOSITORY / "adapters" / "claude" / "settings.example.json"
+CLAUDE_GUARD = REPOSITORY / "adapters" / "claude" / "hooks" / "graph_guard.py"
+CODEX_REVIEWER = REPOSITORY / ".codex" / "agents" / "reviewer.toml"
+
+
+def _load_graph_guard() -> ModuleType:
+    """Import the Stop hook as a module so its checks can be called directly."""
+
+    specification = importlib.util.spec_from_file_location(
+        "graph_guard_under_test", CLAUDE_GUARD
+    )
+    assert specification is not None and specification.loader is not None
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module
 
 
 def _create_windows_junction(link: Path, target: Path) -> None:
@@ -338,6 +355,31 @@ class AdapterSyncTests(unittest.TestCase):
                 os.rmdir(junction)
 
 
+class CodexReviewerAdapterTests(unittest.TestCase):
+    """The Codex reviewer config had no coverage; a rename or typo passed CI."""
+
+    def _load(self) -> dict[str, object]:
+        try:
+            import tomllib  # type: ignore[import-not-found,unused-ignore]
+        except ImportError as exc:  # Python 3.10 has no tomllib.
+            raise unittest.SkipTest(f"tomllib requires Python 3.11: {exc}")
+        parsed = tomllib.loads(CODEX_REVIEWER.read_text(encoding="utf-8"))
+        return cast("dict[str, object]", parsed)
+
+    def test_reviewer_declares_a_read_only_sandbox(self) -> None:
+        config = self._load()
+
+        self.assertEqual("graph_reviewer", config["name"])
+        self.assertEqual("read-only", config["sandbox_mode"])
+
+    def test_reviewer_is_told_not_to_record_its_own_verdict(self) -> None:
+        instructions = str(self._load()["developer_instructions"])
+
+        self.assertIn("PASS, FAIL, or UNCERTAIN", instructions)
+        self.assertIn("do not run graphctl verify yourself", instructions)
+        self.assertIn("task-graph.json", instructions)
+
+
 class ClaudeHookPortabilityTests(unittest.TestCase):
     def test_example_uses_the_project_selected_python_command(self) -> None:
         settings = json.loads(CLAUDE_SETTINGS.read_text(encoding="utf-8"))
@@ -345,3 +387,103 @@ class ClaudeHookPortabilityTests(unittest.TestCase):
 
         self.assertTrue(command.startswith("python "))
         self.assertNotIn("python3", command)
+
+    def test_example_declares_one_stop_hook_command_with_a_timeout(self) -> None:
+        settings = json.loads(CLAUDE_SETTINGS.read_text(encoding="utf-8"))
+
+        self.assertEqual(["Stop"], list(settings["hooks"]))
+        matchers = settings["hooks"]["Stop"]
+        self.assertIsInstance(matchers, list)
+        self.assertEqual(1, len(matchers))
+        entries = matchers[0]["hooks"]
+        self.assertEqual(1, len(entries))
+        self.assertEqual("command", entries[0]["type"])
+        self.assertIn("${CLAUDE_PROJECT_DIR}", entries[0]["command"])
+        self.assertIn("graph_guard.py", entries[0]["command"])
+        self.assertIsInstance(entries[0]["timeout"], int)
+        self.assertGreater(entries[0]["timeout"], 0)
+
+    def test_guard_refuses_an_interpreter_below_the_supported_release(self) -> None:
+        guard = _load_graph_guard()
+
+        with mock.patch.object(sys, "stderr", new=io.StringIO()) as captured:
+            with self.assertRaises(SystemExit) as raised:
+                guard.ensure_supported_python((3, 8, 5))
+
+        self.assertEqual(2, raised.exception.code)
+        message = captured.getvalue()
+        self.assertIn("3.8.5", message)
+        self.assertIn("3.10", message)
+        self.assertIn(".venv/bin/python", message)
+
+    def test_guard_accepts_the_minimum_and_later_supported_releases(self) -> None:
+        guard = _load_graph_guard()
+
+        self.assertEqual((3, 10), guard.MINIMUM_PYTHON)
+        # (3, 10) exercises the equality boundary itself; a 3-tuple such as
+        # (3, 10, 0) already sorts above the 2-tuple minimum and would keep
+        # passing if the comparison were tightened to a strict `>`.
+        for version in ((3, 10), (3, 10, 0), (3, 13, 2), (4, 0, 0)):
+            with self.subTest(version=version):
+                self.assertIsNone(guard.ensure_supported_python(version))
+
+    def _run_guard_as_main(
+        self, faked_version: str, cwd: Path
+    ) -> "subprocess.CompletedProcess[str]":
+        """Execute the hook the way Claude Code does, as `__main__`.
+
+        Calling `ensure_supported_python` directly cannot show that the check is
+        still wired into the script, so deleting the call site would otherwise
+        leave the suite green.
+        """
+
+        program = (
+            "import sys\n"
+            f"sys.version_info = {faked_version}\n"
+            f"exec(open({str(CLAUDE_GUARD)!r}).read())\n"
+        )
+        # Point the guard at an empty project and put the harness on the import
+        # path explicitly, so the result does not depend on whether this
+        # interpreter happens to have the package installed.
+        environment = dict(os.environ)
+        environment["CLAUDE_PROJECT_DIR"] = str(cwd)
+        environment["PYTHONPATH"] = str(REPOSITORY)
+        return subprocess.run(
+            [sys.executable, "-c", program],
+            cwd=cwd,
+            env=environment,
+            input="{}",
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def test_running_the_hook_on_an_old_interpreter_refuses_before_any_check(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result = self._run_guard_as_main("(3, 8, 5)", Path(directory))
+
+        self.assertEqual(2, result.returncode)
+        self.assertIn("3.8.5", result.stderr)
+        self.assertIn(".venv/bin/python", result.stderr)
+
+    def test_running_the_hook_on_a_supported_interpreter_reaches_the_graph_check(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            # No graph in this directory, so a guard that gets past the version
+            # check must exit 0 rather than refusing.
+            result = self._run_guard_as_main("(3, 13, 2)", Path(directory))
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("", result.stderr.strip())
+
+    def test_guard_refuses_the_release_just_below_the_minimum(self) -> None:
+        guard = _load_graph_guard()
+
+        with mock.patch.object(sys, "stderr", new=io.StringIO()):
+            with self.assertRaises(SystemExit) as raised:
+                guard.ensure_supported_python((3, 9, 18))
+
+        self.assertEqual(2, raised.exception.code)

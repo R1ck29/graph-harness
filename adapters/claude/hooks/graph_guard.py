@@ -8,6 +8,40 @@ import os
 import sys
 from pathlib import Path
 
+MINIMUM_PYTHON = (3, 10)
+
+
+def ensure_supported_python(version: tuple[int, ...]) -> None:
+    """Refuse to certify completion from an interpreter the project untests.
+
+    The package declares `requires-python >= 3.10` and CI covers only
+    supported releases, so an older interpreter is an unverified
+    configuration. Exiting 2 keeps the guard fail-closed and puts an
+    actionable message in front of the model instead of an import traceback.
+    """
+
+    if version >= MINIMUM_PYTHON:
+        return
+    running = ".".join(str(part) for part in version[:3])
+    print(
+        "Graph guard needs Python "
+        f"{MINIMUM_PYTHON[0]}.{MINIMUM_PYTHON[1]} or newer but the configured "
+        f"hook command ran {running} from {sys.executable}. Point the Stop "
+        "hook command at the interpreter used to install the harness, such as "
+        ".venv/bin/python, then stop again.",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
+
+if __name__ == "__main__":
+    # Run before importing the harness so an unsupported interpreter reports the
+    # actionable message rather than an import traceback. Importing this module
+    # for tests skips the check so the suite can load it on any interpreter.
+    # sys.version_info is (major, minor, micro, releaselevel, serial) and the
+    # fourth field is a string, so pass only the numeric prefix.
+    ensure_supported_python(sys.version_info[:3])
+
 ROOT = Path(os.environ.get("CLAUDE_PROJECT_DIR", Path.cwd())).resolve()
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))

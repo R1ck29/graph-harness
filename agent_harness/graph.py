@@ -188,7 +188,7 @@ class Graph:
             self._validate_verification(
                 verification, node_id, set(node["acceptance_criteria"])
             )
-            if verification["reviewer_id"] == node.get("executor_id"):
+            if self._same_actor(verification["reviewer_id"], node.get("executor_id")):
                 raise HarnessError(
                     f"node {node_id} verification reviewer must be independent"
                 )
@@ -417,7 +417,7 @@ class Graph:
                 ):
                     raise HarnessError(f"verified node {node['id']} has no PASS review")
                 reviewer_id = verification.get("reviewer_id")
-                if not reviewer_id or reviewer_id == executor_id:
+                if not reviewer_id or self._same_actor(reviewer_id, executor_id):
                     raise HarnessError(
                         f"verified node {node['id']} lacks independent review"
                     )
@@ -536,7 +536,7 @@ class Graph:
         node["evidence"] = items
         if actor_id is not None:
             self._require_non_empty(actor_id, "actor_id")
-            if actor_id != node.get("executor_id"):
+            if not self._same_actor(actor_id, node.get("executor_id")):
                 raise HarnessError(
                     "actor_id must match the executor that started the node"
                 )
@@ -567,7 +567,7 @@ class Graph:
         if result not in RESULTS:
             raise HarnessError(f"invalid verification result: {result}")
         self._require_non_empty(reviewer_id, "reviewer_id")
-        if reviewer_id == node.get("executor_id"):
+        if self._same_actor(reviewer_id, node.get("executor_id")):
             raise HarnessError("reviewer must be independent from executor")
         if result == "pass" and checked_criteria is None:
             raise HarnessError(
@@ -652,7 +652,7 @@ class Graph:
             raise HarnessError(
                 "faulty_node must be the reviewed node or one of its verified ancestors"
             )
-        if reviewer_id == faulty_task.get("executor_id"):
+        if self._same_actor(reviewer_id, faulty_task.get("executor_id")):
             raise HarnessError("reviewer must be independent from faulty-node executor")
         faulty_expected = set(faulty_task["acceptance_criteria"])
         if faulty == node_id:
@@ -721,7 +721,7 @@ class Graph:
         ):
             raise HarnessError("only an UNCERTAIN submission can be withdrawn")
         self._require_non_empty(actor_id, "actor_id")
-        if actor_id != node.get("executor_id"):
+        if not self._same_actor(actor_id, node.get("executor_id")):
             raise HarnessError("actor_id must match the executor that started the node")
         submitted_at = node.get("submitted_at")
         self._require_non_empty(submitted_at, "submitted_at")
@@ -896,6 +896,15 @@ class Graph:
                     "recorded_at": utc_now(),
                 }
             )
+            # The attempt being discarded was never judged on its own merit, so
+            # it must not spend this node's budget. Without the refund, repeated
+            # upstream failures strand a descendant that never failed a review:
+            # `retry` and `start` both refuse it once `attempts` reaches
+            # `max_attempts`, and no CLI command can recover it. Only states
+            # that actually hold a discarded attempt are refunded, so a node
+            # invalidated twice is not credited twice.
+            if previous in {"running", "awaiting_verification", "verified"}:
+                node["attempts"] = max(0, node["attempts"] - 1)
             node["status"] = "invalidated"
             node["failure_reason"] = f"Invalidated by failure of {node_id}"
             invalidated.append(descendant_id)
@@ -916,6 +925,29 @@ class Graph:
     def _require_non_empty(value: Any, label: str) -> None:
         if not isinstance(value, str) or not value.strip():
             raise HarnessError(f"{label} must be a non-empty string")
+
+    @staticmethod
+    def _identity(value: Any) -> str | None:
+        """Reduce an actor label to the form used for every identity check.
+
+        Independence is the invariant this harness exists to protect, so the
+        comparison must not be defeated by padding or capitalisation:
+        `"agent-1 "` and `"Agent-1"` are the same actor as `"agent-1"`.
+        Non-string values compare as absent rather than raising, so callers can
+        pass a missing `executor_id` straight through.
+        """
+
+        if not isinstance(value, str):
+            return None
+        reduced = value.strip().casefold()
+        return reduced or None
+
+    @classmethod
+    def _same_actor(cls, left: Any, right: Any) -> bool:
+        """Return whether two labels name the same actor, absent never matching."""
+
+        reduced = cls._identity(left)
+        return reduced is not None and reduced == cls._identity(right)
 
     @staticmethod
     def _normalize_evidence(

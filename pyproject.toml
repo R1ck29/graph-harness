@@ -8,9 +8,24 @@ license = { text = "MIT" }
 [project.scripts]
 graphctl = "agent_harness.cli:main"
 
+[project.optional-dependencies]
+# Static checks only; the harness itself runs on the standard library. Pinned
+# exactly so a new Black or mypy release cannot fail CI on an unrelated change.
+# Bump deliberately, in its own commit.
+dev = ["black==26.5.1", "mypy==2.3.1"]
+
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["agent_harness"]
+
+[tool.black]
+# Pin the grammar to the minimum supported release so formatting does not
+# depend on the interpreter that happens to run Black.
+target-version = ["py310"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true

@@ -9,3 +9,6 @@ __pycache__/
 evals/results/*.json
 !evals/results/.gitkeep
 .DS_Store
+*.egg-info/
+build/
+dist/

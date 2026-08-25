@@ -558,3 +558,181 @@ class GraphVerificationTests(unittest.TestCase):
             task_graph.node("b")["failure_history"][-1]["faulty_node_criteria"],
         )
         self.assertEqual("ready", task_graph.retry("b"))
+
+
+class ReviewerIndependenceTests(unittest.TestCase):
+    """Independence is the invariant the harness exists to protect."""
+
+    def _submitted(self, executor_id: str) -> Graph:
+        task_graph = Graph.from_dict(graph(node("solo")))
+        task_graph.start("solo", executor_id=executor_id)
+        task_graph.submit(
+            "solo",
+            [{"kind": "test", "summary": "implemented"}],
+            actor_id=executor_id,
+        )
+        return task_graph
+
+    def _pass(self, task_graph: Graph, reviewer_id: str) -> None:
+        task_graph.verify(
+            "solo",
+            "pass",
+            reviewer_id,
+            checked_criteria=["relevant tests pass"],
+            review_evidence=[
+                {"kind": "independent_test", "summary": "reviewer reran the suite"}
+            ],
+        )
+
+    def test_padded_or_recased_reviewer_is_not_independent(self) -> None:
+        for reviewer_id in ("agent-1", "Agent-1", "  agent-1  ", "AGENT-1\t"):
+            with self.subTest(reviewer_id=reviewer_id):
+                task_graph = self._submitted("agent-1 ")
+
+                with self.assertRaisesRegex(HarnessError, "independent"):
+                    self._pass(task_graph, reviewer_id)
+
+                self.assertEqual(
+                    "awaiting_verification", task_graph.node("solo")["status"]
+                )
+
+    def test_a_genuinely_separate_reviewer_still_passes(self) -> None:
+        task_graph = self._submitted("agent-1")
+
+        self._pass(task_graph, "reviewer-2")
+
+        self.assertEqual("verified", task_graph.node("solo")["status"])
+        task_graph.completion_check()
+
+    def test_padded_executor_may_still_submit_and_withdraw_its_own_node(self) -> None:
+        task_graph = self._submitted("agent-1")
+        task_graph.verify(
+            "solo",
+            "uncertain",
+            "reviewer-2",
+            reason="needs stronger evidence",
+        )
+
+        task_graph.withdraw_submission("solo", " AGENT-1 ")
+        self.assertEqual("running", task_graph.node("solo")["status"])
+
+        task_graph.submit(
+            "solo", [{"kind": "test", "summary": "stronger"}], actor_id=" Agent-1 "
+        )
+        self.assertEqual("awaiting_verification", task_graph.node("solo")["status"])
+        self.assertEqual(1, task_graph.node("solo")["attempts"])
+
+    def test_stored_graph_with_padded_identities_is_rejected_on_load(self) -> None:
+        task_graph = self._submitted("agent-1")
+        self._pass(task_graph, "reviewer-2")
+        document = task_graph.to_dict()
+        document["nodes"][0]["executor_id"] = "Reviewer-2 "
+
+        with self.assertRaisesRegex(HarnessError, "independent"):
+            Graph.from_dict(document)
+
+
+class UpstreamInvalidationBudgetTests(unittest.TestCase):
+    """Upstream churn must not spend a descendant's own retry budget."""
+
+    def _chain(self, down_max_attempts: int) -> Graph:
+        return Graph.from_dict(
+            graph(
+                node("up", status="verified"),
+                node("down", depends_on=["up"], max_attempts=down_max_attempts),
+                node("probe", depends_on=["up"]),
+            )
+        )
+
+    def _fail_probe_blaming_up(self, task_graph: Graph) -> list[str]:
+        task_graph.start("probe", executor_id="probe-executor")
+        task_graph.submit(
+            "probe", [{"kind": "test", "summary": "built"}], actor_id="probe-executor"
+        )
+        return task_graph.verify(
+            "probe",
+            "fail",
+            "probe-reviewer",
+            reason="up produced a broken contract",
+            faulty_node="up",
+            failed_criteria=["relevant tests pass"],
+            faulty_criteria=["relevant tests pass"],
+            review_evidence=[
+                {"kind": "test", "summary": "reviewer traced the fault upstream"}
+            ],
+        )
+
+    def _verify(self, task_graph: Graph, node_id: str) -> None:
+        task_graph.start(node_id, executor_id=f"{node_id}-executor")
+        task_graph.submit(
+            node_id,
+            [{"kind": "test", "summary": "done"}],
+            actor_id=f"{node_id}-executor",
+        )
+        task_graph.verify(
+            node_id,
+            "pass",
+            f"{node_id}-reviewer",
+            checked_criteria=["relevant tests pass"],
+            review_evidence=[{"kind": "independent_test", "summary": "reran"}],
+        )
+
+    def test_invalidation_refunds_the_discarded_attempt(self) -> None:
+        task_graph = self._chain(down_max_attempts=1)
+        self._verify(task_graph, "down")
+        self.assertEqual(1, task_graph.node("down")["attempts"])
+
+        self._fail_probe_blaming_up(task_graph)
+
+        down = task_graph.node("down")
+        self.assertEqual("invalidated", down["status"])
+        self.assertEqual(0, down["attempts"])
+
+    def test_a_descendant_that_never_failed_review_stays_recoverable(self) -> None:
+        task_graph = self._chain(down_max_attempts=1)
+        self._verify(task_graph, "down")
+        self._fail_probe_blaming_up(task_graph)
+
+        self.assertEqual("ready", task_graph.retry("up"))
+        self._verify(task_graph, "up")
+        self.assertEqual("ready", task_graph.retry("down"))
+        self._verify(task_graph, "down")
+        self.assertEqual("ready", task_graph.retry("probe"))
+        self._verify(task_graph, "probe")
+
+        task_graph.completion_check()
+
+    def test_a_node_invalidated_twice_is_refunded_only_once(self) -> None:
+        task_graph = self._chain(down_max_attempts=2)
+        self._verify(task_graph, "down")
+        self._fail_probe_blaming_up(task_graph)
+        self.assertEqual(0, task_graph.node("down")["attempts"])
+
+        task_graph.retry("up")
+        self._verify(task_graph, "up")
+        task_graph.retry("probe")
+        self._fail_probe_blaming_up(task_graph)
+
+        self.assertEqual(0, task_graph.node("down")["attempts"])
+
+    def test_a_nodes_own_review_failures_still_exhaust_the_budget(self) -> None:
+        task_graph = Graph.from_dict(graph(node("solo", max_attempts=2)))
+        for _ in range(2):
+            task_graph.start("solo", executor_id="solo-executor")
+            task_graph.submit(
+                "solo", [{"kind": "test", "summary": "try"}], actor_id="solo-executor"
+            )
+            task_graph.verify(
+                "solo",
+                "fail",
+                "solo-reviewer",
+                reason="still broken",
+                failed_criteria=["relevant tests pass"],
+                review_evidence=[{"kind": "test", "summary": "reviewer saw a failure"}],
+            )
+            if task_graph.node("solo")["attempts"] < 2:
+                task_graph.retry("solo")
+
+        self.assertEqual(2, task_graph.node("solo")["attempts"])
+        with self.assertRaisesRegex(HarnessError, "max_attempts"):
+            task_graph.retry("solo")

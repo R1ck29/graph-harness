@@ -28,6 +28,13 @@ completion once per stop attempt. It performs no writes. To enable it, review
 `.claude/settings.json`. It is opt-in because project hooks execute local code.
 Organizations with managed hooks should register the guard centrally instead.
 
+The guard fires on every stop attempt while any node is unverified, whatever the
+turn was about. A wired end-to-end run on 2026-08-25 confirmed this: a session
+asked only to echo one word was blocked from stopping, reported the guard's
+message, and asked the user whether to work the node or pause. That is the
+intended behavior and the reason the hook stays opt-in. Enable it for sessions
+dedicated to graph work, not for a checkout used for unrelated errands.
+
 The settings example uses `python`. Before enabling it, run `python --version`
 and confirm it resolves to Python 3.10 or newer. On Windows, replace `python`
 with `py -3` when the Python launcher is the supported entry point. For the most
@@ -36,6 +43,11 @@ project virtual environment used to install the harness, such as
 `.venv/bin/python` on macOS/Linux or `.venv\\Scripts\\python.exe` on Windows.
 Run the resulting hook command manually from the repository after
 `completion-check` succeeds; enable the setting only after it exits with code 0.
+
+The guard refuses to run at all on an interpreter older than Python 3.10, since
+the project neither declares nor tests that configuration. It exits 2 with the
+interpreter it found and the command to fix, rather than certifying completion
+from an untested runtime.
 
 If the hook command cannot start, Claude Code reports the failure and still
 stops, so treat the guard as a reminder and keep `completion-check` in CI.

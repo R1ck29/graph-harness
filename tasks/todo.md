@@ -128,3 +128,83 @@ item left unverified in the review above.
   consent and that a self-issued review is what the separation exists to
   prevent. Graph state was unchanged, confirmed by hash. That is a model
   judgement, not an enforced control, and it does not change the finding above.
+
+## Closing the open concerns (2026-08-25)
+
+### Plan
+
+- [x] Enforce the static checks the review notes claimed, instead of only
+      running them by hand.
+- [x] Stop the Claude hook from certifying completion on an untested runtime.
+- [x] Exercise the Stop hook through Claude Code itself, not a piped stdin.
+- [x] Cover the Codex reviewer config, which had no test at all.
+- [x] Independent subagent review of the change and of `agent_harness/graph.py`.
+
+### Review
+
+- CI gained a `static` job running Black and mypy. Neither ran in CI before, and
+  no development dependency was declared, so a type or formatting regression
+  reached `main` unnoticed. `pyproject.toml` now declares a `dev` extra and pins
+  the Black grammar to `py310` and mypy to `strict`, so local and CI agree.
+- That job immediately earned itself: mypy rejected the first version of the new
+  hook guard, because `sys.version_info` is `tuple[int, int, int, str, int]`
+  rather than `tuple[int, ...]`. The guard now passes `sys.version_info[:3]`.
+- The Stop hook refuses to run below Python 3.10 and names the interpreter it
+  found and the command to fix. Previously the example's bare `python` silently
+  ran 3.8.5 on this machine, which the project neither declares nor tests. The
+  check sits under `__main__` so it precedes the harness imports when run as a
+  hook while leaving the module importable for tests.
+- The hook was verified through Claude Code end to end for the first time. A
+  real `claude -p` session in a disposable checkout, with the hook wired into
+  `.claude/settings.json`, was blocked from stopping, surfaced the guard's
+  message, and asked whether to work the node or pause; `stop_hook_active`
+  ended the run cleanly. Earlier sessions had only piped JSON to the script.
+- That run also showed the guard fires on any stop attempt while a node is
+  unverified, whatever the turn was about. Recorded in the adapter README as the
+  reason the hook stays opt-in.
+- `.codex/agents/reviewer.toml` had no coverage, so a rename or typo in the
+  read-only contract would have passed CI. Two tests now assert the sandbox mode
+  and the no-self-verdict instruction; they skip on Python 3.10, which has no
+  `tomllib`.
+- 73 tests pass on Python 3.11 and on the 3.8.5 interpreter this machine's
+  `python3` resolves to, plus Black, mypy, adapter drift, compileall, and five
+  offline eval cases. Every new test was mutation-checked.
+
+### Independent review findings (2026-08-25)
+
+A subagent reviewed the change and audited `agent_harness/graph.py`, which had
+only been exercised behaviorally. Both severe findings were reproduced
+independently before any fix.
+
+- **Reviewer independence was defeated by one trailing space.** Identity checks
+  compared raw strings, so executor `"agent-1 "` and reviewer `"agent-1"` were
+  different actors. A single agent ran start, submit and PASS and reached
+  `{"complete": true}`; a case-only difference worked the same way. All six
+  comparison sites now go through `_same_actor`, which strips and casefolds.
+  This defeated the one invariant the harness exists to enforce.
+- **Upstream failure permanently stranded innocent descendants.** Invalidation
+  never refunded the discarded attempt, so every upstream FAIL spent one attempt
+  from every descendant. With the schema minimum `max_attempts: 1`, one upstream
+  failure left a node that never failed a review at `1/1`, where both `retry`
+  and `start` refuse it and no CLI command can recover it. Confirmed the
+  objective became uncompletable. `_invalidate_descendants` now refunds the
+  attempt for the states that actually hold discarded work, and only once per
+  invalidation. A node's own review failures still exhaust the budget.
+- The version guard's wiring was untested: deleting the `__main__` call left all
+  tests green. Two tests now execute the hook as `__main__` with a faked
+  interpreter version, pinning `CLAUDE_PROJECT_DIR` and `PYTHONPATH` so the
+  result does not depend on whether the package is installed.
+- `test_guard_accepts_...` never touched its own boundary, because `(3, 10, 0)`
+  already sorts above the 2-tuple `(3, 10)`; tightening `>=` to `>` kept the
+  suite green. `(3, 10)` is now in the accept list.
+- Static checks were narrower than the trees CI runs: `evals/` was checked by
+  neither tool and `tests/` was not type-checked. Both are now covered, which
+  required fixing two real mypy errors in the new test code. Tool versions are
+  pinned exactly so an unrelated release cannot red the job.
+- 83 tests pass on Python 3.11 and on this machine's 3.8.5, plus Black, mypy
+  over 18 files, adapter drift, compileall, and five offline eval cases. Every
+  fix was mutation-checked: reverting either severe fix fails the new tests.
+
+Not done: no Codex session was run. `codex doctor` reports no warnings and the
+reviewer config's field names appear in the Codex binary, but that is evidence
+the configuration is well formed, not proof a review round-trips.
