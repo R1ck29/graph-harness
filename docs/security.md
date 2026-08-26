@@ -31,7 +31,9 @@ calls or write operations.
 
 The harness does not auto-approve destructive commands, bypass sandboxes, or
 require external services. It does persist submitted and reviewer evidence in
-the graph and archives prior-attempt evidence during retry. Never put passwords,
+the graph, archives prior-attempt evidence during retry, and archives each
+withdrawn UNCERTAIN submission with its evidence in `review_history` until the
+bounds in `core/verification.md` discard the oldest records. Never put passwords,
 API keys, customer names, contract terms, personal data, or unredacted client
 material in `--evidence` or an evidence JSON file. Command arguments may also be
 retained by shell history or visible to local process inspection. Store only

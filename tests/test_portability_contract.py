@@ -360,7 +360,9 @@ class CodexReviewerAdapterTests(unittest.TestCase):
 
     def _load(self) -> dict[str, object]:
         try:
-            import tomllib  # type: ignore[import-not-found,unused-ignore]
+            # 3.10 has no tomllib at all; 3.11+ ships it without a py.typed
+            # marker, so the two interpreters raise different codes here.
+            import tomllib  # type: ignore[import-not-found,import-untyped,unused-ignore]
         except ImportError as exc:  # Python 3.10 has no tomllib.
             raise unittest.SkipTest(f"tomllib requires Python 3.11: {exc}")
         parsed = tomllib.loads(CODEX_REVIEWER.read_text(encoding="utf-8"))

@@ -91,7 +91,11 @@ read-only reviewer, and let the reviewer supply the final two arguments.
 
 Create a graph for your own one-step objective with `graphctl init --objective
 "..." --criterion "..."`. The command refuses to overwrite an existing graph.
-Run `graphctl doctor` when setup or a lock appears unhealthy.
+Grow it into a dependency graph with `graphctl add-node NODE --description
+"..." --criterion "..." --depends-on EXISTING`, adding each node after the ones
+it depends on. A new node starts `blocked` and becomes `ready` once every
+dependency is verified. Run `graphctl doctor` when setup or a lock appears
+unhealthy.
 
 Run every `graphctl` command from the directory that holds `task-graph.json`.
 The workspace is the current directory, so a graph in a parent directory is

@@ -2,8 +2,9 @@
 
 This repository records structured objectives in a verified task graph. Before
 non-trivial work, read `core/protocol.md`. If `task-graph.json` is missing, use
-`graphctl init --objective "..." --criterion "..."` or copy an appropriate
-example; otherwise validate it with `graphctl validate`.
+`graphctl init --objective "..." --criterion "..."` followed by one
+`graphctl add-node` per further task, or copy an appropriate example; otherwise
+validate it with `graphctl validate`.
 
 Use the installed `graphctl` entry point. In an uninstalled source checkout,
 replace `graphctl` with `python scripts/graphctl.py`.

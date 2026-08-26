@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import json
 import unittest
+from typing import Any
 
 from agent_harness.errors import HarnessError
-from agent_harness.graph import Graph
+from agent_harness.graph import (
+    MAX_EVIDENCE,
+    MAX_REVIEW_HISTORY_BYTES,
+    MAX_TEXT,
+    Graph,
+)
 
 from tests.helpers import graph, node
 
@@ -877,3 +884,199 @@ class VerificationRecordIntegrityTests(unittest.TestCase):
         solo = task_graph.node("solo")
         self.assertEqual("failed", solo["status"])
         self.assertEqual("fail", solo["verification"]["result"])
+
+
+class GraphAuthoringTests(unittest.TestCase):
+    """A planner can build the documented DAG without hand-editing the file."""
+
+    def test_added_node_is_blocked_until_its_dependency_is_verified(self) -> None:
+        task_graph = Graph.from_dict(graph(node("plan")))
+
+        status = task_graph.add_node(
+            "implement",
+            "Write the parser",
+            ["parser round-trips"],
+            depends_on=["plan"],
+        )
+
+        self.assertEqual("blocked", status)
+        self.assertEqual(["plan"], task_graph.ready_node_ids())
+
+    def test_added_node_is_ready_when_every_dependency_is_verified(self) -> None:
+        task_graph = Graph.from_dict(graph(node("plan", status="verified")))
+
+        status = task_graph.add_node(
+            "implement",
+            "Write the parser",
+            ["parser round-trips"],
+            depends_on=["plan"],
+            assigned_role="specialist",
+            max_attempts=3,
+        )
+
+        self.assertEqual("ready", status)
+        implement = task_graph.node("implement")
+        self.assertEqual("specialist", implement["assigned_role"])
+        self.assertEqual(3, implement["max_attempts"])
+
+    def test_a_rejected_addition_leaves_the_graph_unchanged(self) -> None:
+        task_graph = Graph.from_dict(graph(node("plan")))
+        before = task_graph.to_dict()
+
+        rejected: list[tuple[str, str, list[str], list[str]]] = [
+            ("plan", "Duplicate identifier", ["c"], []),
+            ("later", "Unknown dependency", ["c"], ["missing"]),
+            ("bad id", "Invalid identifier", ["c"], []),
+            ("empty", "No acceptance criteria", [], []),
+        ]
+        for node_id, description, criteria, depends_on in rejected:
+            with self.assertRaises(HarnessError):
+                task_graph.add_node(node_id, description, criteria, depends_on)
+
+        self.assertEqual(before, task_graph.to_dict())
+
+    def test_an_added_node_cannot_introduce_a_cycle(self) -> None:
+        task_graph = Graph.from_dict(graph(node("plan")))
+        task_graph.add_node("implement", "Write it", ["c"], depends_on=["plan"])
+
+        with self.assertRaises(HarnessError):
+            task_graph.add_node("implement", "Rebind", ["c"], depends_on=["implement"])
+
+
+class ReviewHistoryBoundTests(unittest.TestCase):
+    """A full review history bounds the trail; it must never wedge the node."""
+
+    _full_history: dict[str, Any] = {}
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        task_graph = Graph.from_dict(graph(node("solo")))
+        task_graph.start("solo", executor_id="e1")
+        for index in range(MAX_EVIDENCE):
+            task_graph.submit(
+                "solo",
+                [{"kind": "test", "summary": f"attempt {index}"}],
+                actor_id="e1",
+            )
+            task_graph.verify("solo", "uncertain", "r1", reason=f"unclear {index}")
+            task_graph.withdraw_submission("solo", "e1")
+        task_graph.submit("solo", [{"kind": "test", "summary": "final"}], actor_id="e1")
+        cls._full_history = task_graph.to_dict()
+
+    def _awaiting_with_full_history(self) -> Graph:
+        return Graph.from_dict(self._full_history)
+
+    def test_the_trail_keeps_the_newest_records_and_drops_the_oldest(self) -> None:
+        task_graph = self._awaiting_with_full_history()
+        task_graph.verify("solo", "uncertain", "r1", reason="one too many")
+
+        task_graph.withdraw_submission("solo", "e1")
+
+        history = task_graph.node("solo")["review_history"]
+        reasons = [record["verification"]["reason"] for record in history]
+        self.assertEqual(MAX_EVIDENCE, len(history))
+        self.assertEqual("unclear 1", reasons[0])
+        self.assertEqual("one too many", reasons[-1])
+
+    def test_a_verdict_is_still_recordable_over_a_full_trail(self) -> None:
+        task_graph = self._awaiting_with_full_history()
+        task_graph.verify("solo", "uncertain", "r1", reason="still unclear")
+
+        task_graph.verify(
+            "solo",
+            "fail",
+            "r2",
+            reason="the suite is red",
+            failed_criteria=["relevant tests pass"],
+            review_evidence=[{"kind": "test", "summary": "reviewer saw a failure"}],
+        )
+
+        solo = task_graph.node("solo")
+        self.assertEqual("failed", solo["status"])
+        self.assertEqual(MAX_EVIDENCE, len(solo["review_history"]))
+
+    def test_the_executor_can_still_withdraw_and_resubmit(self) -> None:
+        task_graph = self._awaiting_with_full_history()
+        task_graph.verify("solo", "uncertain", "r1", reason="still unclear")
+
+        task_graph.withdraw_submission("solo", "e1")
+        task_graph.submit(
+            "solo", [{"kind": "test", "summary": "stronger"}], actor_id="e1"
+        )
+
+        self.assertEqual("awaiting_verification", task_graph.node("solo")["status"])
+        self.assertEqual(1, task_graph.node("solo")["attempts"])
+
+    def test_the_trail_is_bounded_by_size_before_the_record_count(self) -> None:
+        # Large submissions reach the storage layer's document ceiling in a few
+        # dozen cycles. Past it every transition fails to save and the whole
+        # graph freezes, so the count bound alone does not keep a node movable.
+        task_graph = Graph.from_dict(graph(node("solo")))
+        task_graph.start("solo", executor_id="e1")
+        bulk = "x" * (MAX_TEXT - 1)
+        evidence = [{"kind": "test", "summary": bulk, "value": bulk} for _ in range(8)]
+
+        for index in range(4):
+            task_graph.submit("solo", evidence, actor_id="e1")
+            task_graph.verify("solo", "uncertain", "r1", reason=f"unclear {index}")
+            task_graph.withdraw_submission("solo", "e1")
+
+        history = task_graph.node("solo")["review_history"]
+        self.assertLess(len(history), 4)
+        self.assertLessEqual(len(json.dumps(history)), MAX_REVIEW_HISTORY_BYTES)
+        self.assertEqual("unclear 3", history[-1]["verification"]["reason"])
+
+
+class UpstreamSurfaceTests(unittest.TestCase):
+    """The reviewer is shown the verified surface this node's work can break."""
+
+    def _graph(self) -> Graph:
+        task_graph = Graph.from_dict(
+            graph(
+                node("plan", status="verified"),
+                node("implement", depends_on=["plan"], status="verified"),
+                node("harden", depends_on=["implement"]),
+            )
+        )
+        task_graph.node("plan")["review_context"] = {"relevant_files": ["docs/spec.md"]}
+        task_graph.node("implement")["review_context"] = {
+            "relevant_files": ["src/calc.py"]
+        }
+        return task_graph
+
+    def test_ancestors_are_reported_in_dependency_order(self) -> None:
+        self.assertEqual(["plan", "implement"], self._graph().ancestors("harden"))
+        self.assertEqual([], self._graph().ancestors("plan"))
+
+    def test_the_packet_names_each_verified_ancestor_and_its_files(self) -> None:
+        task_graph = self._graph()
+        task_graph.start("harden", executor_id="e1")
+        task_graph.submit(
+            "harden", [{"kind": "test", "summary": "hardened"}], actor_id="e1"
+        )
+
+        packet = task_graph.review_packet("harden")
+
+        self.assertEqual(
+            [
+                {"node": "plan", "files": ["docs/spec.md"]},
+                {"node": "implement", "files": ["src/calc.py"]},
+            ],
+            packet["upstream_verified_files"],
+        )
+
+    def test_an_ancestor_without_reviewed_files_contributes_no_surface(self) -> None:
+        task_graph = Graph.from_dict(
+            graph(
+                node("plan", status="verified"),
+                node("implement", depends_on=["plan"]),
+            )
+        )
+        task_graph.start("implement", executor_id="e1")
+        task_graph.submit(
+            "implement", [{"kind": "test", "summary": "done"}], actor_id="e1"
+        )
+
+        packet = task_graph.review_packet("implement")
+
+        self.assertEqual([], packet["upstream_verified_files"])

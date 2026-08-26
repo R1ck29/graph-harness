@@ -18,6 +18,17 @@ After UNCERTAIN, the original executor runs `graphctl withdraw NODE --actor-id
 EXECUTOR`, collects stronger evidence, and submits again. Withdrawal is refused
 for PASS, FAIL, or a different executor and does not increment `attempts`.
 
+A PASS is a point-in-time record, not a lock on the files behind it. Under
+`upstream_verified_files` the packet lists the reviewed files of every verified
+ancestor that recorded any, which is why submissions name them with
+`--relevant-file`. When the node under review changed one of those files,
+confirm that ancestor still holds; if it does not, FAIL with `--faulty-node`
+naming it.
+
+A withdrawn UNCERTAIN submission is archived with its evidence in the node's
+`review_history`. That archive is bounded by both record count and serialized
+size, so the oldest records are discarded once either bound is reached.
+
 The reviewer reports and never repairs code in the same review context.
 The faulty node may be the reviewed node or one of its verified ancestors; an
 unrelated node cannot be reopened through the review command. When reopening an

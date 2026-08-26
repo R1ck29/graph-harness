@@ -51,7 +51,7 @@ def compare_case(case: dict[str, Any]) -> dict[str, Any]:
     graph = Graph.from_dict(case["task_graph"])
     failure_node = case["failure_node"]
     descendants = graph.descendants(failure_node)
-    ancestors = _ancestors(graph, failure_node)
+    ancestors = set(graph.ancestors(failure_node))
     _complete_ancestors(graph, failure_node, ancestors)
     target = graph.node(failure_node)
     graph.start(failure_node, executor_id=f"eval-executor:{failure_node}")
@@ -98,18 +98,6 @@ def compare_case(case: dict[str, Any]) -> dict[str, Any]:
             "failed_node_retryable": retry_status == "ready",
         },
     }
-
-
-def _ancestors(graph: Graph, node_id: str) -> set[str]:
-    found: set[str] = set()
-    pending = list(graph.node(node_id)["depends_on"])
-    while pending:
-        current = pending.pop()
-        if current in found:
-            continue
-        found.add(current)
-        pending.extend(graph.node(current)["depends_on"])
-    return found
 
 
 def _criterion_evidence(node: dict[str, Any], summary: str) -> list[dict[str, str]]:

@@ -12,7 +12,10 @@ adapter directories are generated; do not edit them directly.
 2. Start it with a stable executor identity.
 3. Read its objective, dependencies, acceptance criteria, and relevant failures.
 4. Implement the smallest complete change and run focused checks.
-5. Submit evidence for each criterion using `graphctl submit`.
+5. Submit evidence for each criterion using `graphctl submit`, naming the
+   files you changed with `--relevant-file`. A later node's reviewer is shown
+   that list as this node's verified surface; without it a regression here
+   cannot be caught.
 6. Stop implementation and hand the review packet to a separate reviewer.
 7. If the result is UNCERTAIN, withdraw as the original executor, strengthen
    the evidence, and submit again without opening a new attempt.

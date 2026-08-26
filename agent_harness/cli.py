@@ -187,7 +187,48 @@ def build_parser() -> argparse.ArgumentParser:
     )
     init.add_argument("--node", default="task", help="task identifier (default: task)")
     init.add_argument(
+        "--description",
+        help="the observable outcome of the first task (default: the objective)",
+    )
+    init.add_argument(
         "--role", default="implementer", help="assigned role (default: implementer)"
+    )
+    init.add_argument(
+        "--max-attempts",
+        type=int,
+        default=2,
+        dest="max_attempts",
+        help="attempt budget (default: 2)",
+    )
+    add = commands.add_parser(
+        "add-node", help="add one planned task to an existing graph"
+    )
+    add.add_argument("node", help="task identifier")
+    add.add_argument(
+        "--description", required=True, help="the observable outcome of the task"
+    )
+    add.add_argument(
+        "--criterion",
+        action="append",
+        required=True,
+        help="acceptance criterion; repeat for each criterion",
+    )
+    add.add_argument(
+        "--depends-on",
+        action="append",
+        default=[],
+        dest="depends_on",
+        help="existing task this one requires; repeat for each dependency",
+    )
+    add.add_argument(
+        "--role", default="implementer", help="assigned role (default: implementer)"
+    )
+    add.add_argument(
+        "--max-attempts",
+        type=int,
+        default=2,
+        dest="max_attempts",
+        help="attempt budget (default: 2)",
     )
     commands.add_parser(
         "doctor", help="report graph and lock diagnostics without changing files"
@@ -272,14 +313,14 @@ def run(args: argparse.Namespace) -> Any:
             "nodes": [
                 {
                     "id": args.node,
-                    "description": args.objective,
+                    "description": args.description or args.objective,
                     "status": "blocked",
                     "depends_on": [],
                     "assigned_role": args.role,
                     "acceptance_criteria": args.criterion,
                     "evidence": [],
                     "attempts": 0,
-                    "max_attempts": 2,
+                    "max_attempts": args.max_attempts,
                     "failure_reason": None,
                 }
             ],
@@ -303,6 +344,25 @@ def run(args: argparse.Namespace) -> Any:
             "next_action": (
                 f"Start node {args.node!r} with the executor identity; use the same "
                 "--graph value supplied to this command."
+            ),
+        }
+    if args.command == "add-node":
+        status = store.mutate(
+            lambda graph: graph.add_node(
+                args.node,
+                args.description,
+                args.criterion,
+                depends_on=args.depends_on,
+                assigned_role=args.role,
+                max_attempts=args.max_attempts,
+            )
+        )
+        return {
+            "node": args.node,
+            "status": status,
+            "next_action": (
+                f"Add the tasks that depend on {args.node!r}, then validate the "
+                "graph before execution."
             ),
         }
     if args.command == "doctor":

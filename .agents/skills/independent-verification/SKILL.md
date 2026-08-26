@@ -12,16 +12,19 @@ client and adapter directories are generated; do not edit them directly.
 2. Use a fresh agent context distinct from the executor.
 3. Inspect the original objective, node criteria, relevant files, diff, tests,
    and current-attempt evidence only.
-4. Return PASS only when every criterion is supported, and supply explicit
+4. When the node changed a file listed under `upstream_verified_files`,
+   confirm that verified ancestor still holds; a PASS is a point-in-time
+   record, not a lock on the files behind it.
+5. Return PASS only when every criterion is supported, and supply explicit
    reviewer criteria and evidence to `graphctl verify`.
-5. On FAIL, identify the observed criterion, evidence, faulty node, affected
+6. On FAIL, identify the observed criterion, evidence, faulty node, affected
    descendants, and minimal retry recommendation. If the faulty node is an
    ancestor, also map the failure to that node's acceptance criterion.
-6. Record the verdict through `graphctl verify`; do not edit implementation.
+7. Record the verdict through `graphctl verify`; do not edit implementation.
    When the reviewer runs as a delegated review context, it reports the verdict,
    checked criteria, and reviewer evidence instead, and the caller records them
    verbatim under the reviewer identity. Apply this whenever the reviewer is a
    subagent, even if its tools would technically permit the write: a self-issued
    review record defeats the separation this step exists to create.
-7. Run `graphctl` from the directory that holds `task-graph.json`; a graph in a
+8. Run `graphctl` from the directory that holds `task-graph.json`; a graph in a
    parent directory is rejected as outside the workspace.

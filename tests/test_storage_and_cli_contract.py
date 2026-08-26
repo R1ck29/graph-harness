@@ -383,3 +383,79 @@ class GraphCtlAtomicityTests(unittest.TestCase):
             self.assertEqual(2, missing.returncode)
             self.assertIn("graph file not found", missing.stderr)
             self.assertIn("graphctl init", missing.stderr)
+
+
+class GraphCtlAuthoringTests(unittest.TestCase):
+    """The planner builds a multi-node graph through the CLI, as documented."""
+
+    def _run(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(GRAPHCTL), *arguments],
+            cwd=REPOSITORY,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def test_add_node_builds_a_dag_and_rejects_a_bad_addition_atomically(self) -> None:
+        with tempfile.TemporaryDirectory(dir=REPOSITORY) as directory:
+            path = Path(directory) / "task-graph.json"
+            created = self._run(
+                "--graph",
+                str(path),
+                "init",
+                "--objective",
+                "Ship the parser",
+                "--node",
+                "plan",
+                "--criterion",
+                "the design is written down",
+                "--description",
+                "Agree the parser design",
+                "--max-attempts",
+                "4",
+            )
+            self.assertEqual(0, created.returncode, created.stderr)
+            root = json.loads(path.read_text(encoding="utf-8"))["nodes"][0]
+            self.assertEqual("Agree the parser design", root["description"])
+            self.assertEqual(4, root["max_attempts"])
+
+            added = self._run(
+                "--graph",
+                str(path),
+                "add-node",
+                "implement",
+                "--description",
+                "Write the parser",
+                "--criterion",
+                "the parser round-trips",
+                "--depends-on",
+                "plan",
+                "--role",
+                "specialist",
+                "--max-attempts",
+                "3",
+            )
+
+            self.assertEqual(0, added.returncode, added.stderr)
+            self.assertEqual("blocked", json.loads(added.stdout)["status"])
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(["plan", "implement"], [n["id"] for n in saved["nodes"]])
+            self.assertEqual("specialist", saved["nodes"][1]["assigned_role"])
+            self.assertEqual(3, saved["nodes"][1]["max_attempts"])
+
+            before = path.read_text(encoding="utf-8")
+            rejected = self._run(
+                "--graph",
+                str(path),
+                "add-node",
+                "implement",
+                "--description",
+                "Duplicate",
+                "--criterion",
+                "c",
+            )
+
+            self.assertEqual(2, rejected.returncode)
+            self.assertIn("duplicate node id", rejected.stderr)
+            self.assertEqual(before, path.read_text(encoding="utf-8"))

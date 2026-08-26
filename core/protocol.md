@@ -7,6 +7,8 @@ nodes. A separate reviewer receives a compact review packet and records
 
 ## Lifecycle
 
+0. Build the graph with `graphctl init` and one `graphctl add-node` per further
+   task. Only the CLI writes the graph file.
 1. Validate the graph before execution.
 2. Start a `ready` node with an executor identity.
 3. Submit current-attempt evidence mapped to acceptance criteria.
@@ -17,6 +19,12 @@ nodes. A separate reviewer receives a compact review packet and records
    its evidence, and submit again without opening a new attempt.
 7. On failure, retry the faulty node and only its invalidated descendants.
 8. Treat the objective as complete only when `completion-check` succeeds.
+
+A verdict records what a reviewer observed at one moment. It does not bind the
+files it was based on, so later work can rewrite code an ancestor was verified
+against. `review-packet` therefore names each verified ancestor's reviewed files
+as `upstream_verified_files`; a regression there is reported with
+`verify --fail --faulty-node ANCESTOR`.
 
 Agents must not edit status, attempts, verification, or failure history directly.
 Canonical graph files are JSON. JSON is a YAML 1.2 subset, but v1 intentionally

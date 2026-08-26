@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import re
 from collections import deque
 from datetime import datetime, timezone
@@ -40,6 +41,11 @@ MAX_CRITERIA = 128
 MAX_EVIDENCE = 512
 MAX_TEXT = 32_768
 MAX_ATTEMPTS = 20
+# A quarter of the 4 MiB document ceiling enforced by the storage layer. The
+# archive is the only part of the document that grows without an attempt being
+# spent, so it is the only part that can push a graph past that ceiling on its
+# own; the remaining three quarters stay available to the rest of the document.
+MAX_REVIEW_HISTORY_BYTES = 1_048_576
 
 
 def utc_now() -> str:
@@ -479,6 +485,56 @@ class Graph:
         order = self._topological_ids()
         return [candidate for candidate in order if candidate in seen]
 
+    def ancestors(self, node_id: str) -> list[str]:
+        """Return every node this one transitively depends on, in graph order."""
+
+        seen: set[str] = set()
+        queue = deque(sorted(self.node(node_id)["depends_on"]))
+        while queue:
+            current = queue.popleft()
+            if current in seen:
+                continue
+            seen.add(current)
+            queue.extend(sorted(self.node(current)["depends_on"]))
+        order = self._topological_ids()
+        return [candidate for candidate in order if candidate in seen]
+
+    def add_node(
+        self,
+        node_id: str,
+        description: str,
+        acceptance_criteria: Iterable[str],
+        depends_on: Iterable[str] | None = None,
+        assigned_role: str = "implementer",
+        max_attempts: int = 2,
+    ) -> str:
+        """Append one planned node and return the status validation gave it.
+
+        Planning a dependency graph is the harness's own documented workflow,
+        so it must not require hand-editing the file the protocol reserves for
+        this CLI. The candidate document is validated before it is adopted, so
+        a rejected addition leaves the graph exactly as it was.
+        """
+
+        candidate = self.to_dict()
+        candidate["nodes"].append(
+            {
+                "id": node_id,
+                "description": description,
+                "status": "blocked",
+                "depends_on": list(depends_on or []),
+                "assigned_role": assigned_role,
+                "acceptance_criteria": list(acceptance_criteria),
+                "evidence": [],
+                "attempts": 0,
+                "max_attempts": max_attempts,
+                "failure_reason": None,
+            }
+        )
+        validated = Graph.from_dict(candidate)
+        self.document = validated.document
+        return str(self.node(node_id)["status"])
+
     def transition(self, node_id: str, status: str) -> None:
         """Reject arbitrary state changes; callers must use named operations."""
 
@@ -733,17 +789,8 @@ class Graph:
         self._require_non_empty(actor_id, "actor_id")
         if not self._same_actor(actor_id, node.get("executor_id")):
             raise HarnessError("actor_id must match the executor that started the node")
-        submitted_at = node.get("submitted_at")
-        self._require_non_empty(submitted_at, "submitted_at")
-        node.setdefault("review_history", []).append(
-            {
-                "verification": copy.deepcopy(verification),
-                "submission_evidence": copy.deepcopy(node["evidence"]),
-                "review_context": copy.deepcopy(node.get("review_context", {})),
-                "submitted_at": submitted_at,
-                "withdrawn_at": utc_now(),
-            }
-        )
+        self._require_non_empty(node.get("submitted_at"), "submitted_at")
+        self._archive_review(node, verification)
         node["verification"] = None
         node.pop("reviewer_id", None)
         node.pop("submitted_at", None)
@@ -800,8 +847,33 @@ class Graph:
             "test_output_artifact": node.get("review_context", {}).get(
                 "test_output_artifact"
             ),
+            "upstream_verified_files": self._upstream_verified_files(node_id),
             "attempt": node["attempts"],
         }
+
+    def _upstream_verified_files(self, node_id: str) -> list[dict[str, Any]]:
+        """List the files each verified ancestor was reviewed against.
+
+        A PASS records what a reviewer observed at one moment; it is not a
+        binding on the files. Later work can rewrite the very code an ancestor
+        was verified against, and nothing in the graph notices. The reviewer of
+        the node doing that work is the one placed to catch it, so the packet
+        names the surface at risk. A regression there is reported with
+        `verify --fail --faulty-node ANCESTOR`, which reopens exactly that node
+        and its descendants.
+
+        A packet is only produced while the node awaits verification, and an
+        active node's dependencies are verified transitively, so every ancestor
+        reached here is verified.
+        """
+
+        upstream: list[dict[str, Any]] = []
+        for ancestor_id in self.ancestors(node_id):
+            context = self.node(ancestor_id).get("review_context", {})
+            files = list(context.get("relevant_files", []))
+            if files:
+                upstream.append({"node": ancestor_id, "files": files})
+        return upstream
 
     def completion_check(self) -> None:
         incomplete = [node["id"] for node in self.nodes if node["status"] != "verified"]
@@ -937,7 +1009,40 @@ class Graph:
             raise HarnessError(f"{label} must be a non-empty string")
 
     @staticmethod
-    def _record_verification(node: dict[str, Any], review: dict[str, Any]) -> None:
+    def _archive_review(node: dict[str, Any], verification: Mapping[str, Any]) -> None:
+        """Append one superseded UNCERTAIN review to the bounded audit trail.
+
+        The trail is capped like every other list in the document. Refusing the
+        append at the cap would wedge the node instead of bounding it: with a
+        full history, `withdraw`, `submit`, and all three `verify` verdicts are
+        rejected and no transition remains. Discarding the oldest record keeps
+        the node movable and keeps the most recent doubt visible.
+
+        A count alone does not bound it. Each record copies the submission it
+        archives, so a few dozen large submissions reach the storage layer's
+        document ceiling long before 512 records do -- and past that ceiling
+        every transition fails to save, freezing the whole graph rather than one
+        node. The trail is therefore bounded by serialized size as well, down to
+        empty if one record alone exceeds the budget. Losing archived doubt is
+        recoverable; a graph that cannot be written is not.
+        """
+
+        history: list[dict[str, Any]] = node.setdefault("review_history", [])
+        history.append(
+            {
+                "verification": copy.deepcopy(dict(verification)),
+                "submission_evidence": copy.deepcopy(node["evidence"]),
+                "review_context": copy.deepcopy(node.get("review_context", {})),
+                "submitted_at": node["submitted_at"],
+                "withdrawn_at": utc_now(),
+            }
+        )
+        del history[: max(0, len(history) - MAX_EVIDENCE)]
+        while history and len(json.dumps(history)) > MAX_REVIEW_HISTORY_BYTES:
+            del history[0]
+
+    @classmethod
+    def _record_verification(cls, node: dict[str, Any], review: dict[str, Any]) -> None:
         """Attach *review*, preserving an UNCERTAIN verdict it supersedes.
 
         `withdraw` archives an UNCERTAIN review so the recorded doubt survives
@@ -953,15 +1058,7 @@ class Graph:
             and previous.get("result") == "uncertain"
             and isinstance(node.get("submitted_at"), str)
         ):
-            node.setdefault("review_history", []).append(
-                {
-                    "verification": copy.deepcopy(previous),
-                    "submission_evidence": copy.deepcopy(node["evidence"]),
-                    "review_context": copy.deepcopy(node.get("review_context", {})),
-                    "submitted_at": node["submitted_at"],
-                    "withdrawn_at": utc_now(),
-                }
-            )
+            cls._archive_review(node, previous)
         node["verification"] = review
 
     @staticmethod
