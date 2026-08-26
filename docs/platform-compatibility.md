@@ -32,6 +32,13 @@ Local version: `codex-cli 0.146.1`.
   sandboxes plus separate approval policies. The harness does not weaken them.
 - This installed CLI has no `--worktree` flag. Use client-provided agent
   isolation when available or an explicitly created Git worktree.
+- A full review round trip was exercised on 2026-08-26: `codex exec --sandbox
+  read-only` in a self-contained checkout read `AGENTS.md` and the generated
+  skill, took the packet from `graphctl review-packet`, checked the criterion
+  and the packet's `upstream_verified_files` independently, and reported a
+  verdict with its own evidence and reviewer identity without running
+  `graphctl verify` or writing any file. The main session then recorded that
+  verdict verbatim.
 
 Sources: [AGENTS.md](https://developers.openai.com/codex/guides/agents-md),
 [skills](https://developers.openai.com/codex/skills),

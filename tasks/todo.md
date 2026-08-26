@@ -87,3 +87,19 @@ review of the diff.
   `--faulty-node` path instead.
 - Refusing `verify --pass` when `relevant_files` is empty. It would invalidate
   existing graphs for a procedural omission the skill now prevents.
+
+## Remaining items closed
+
+- **Codex was never exercised end to end.** It is now: a read-only `codex exec`
+  session reviewed an awaiting node in a self-contained checkout and reported
+  PASS with its own evidence, without writing or self-recording. It also acted
+  on `upstream_verified_files`, so the reviewer-facing half of the staleness
+  fix works in the client that was never tested. Recorded in
+  `docs/platform-compatibility.md`.
+- Clean-install quick start (`pip install .`, README commands verbatim) reaches
+  `{"complete": true}`, and `add-node` then extends the finished graph, the new
+  node going straight to `ready`.
+- The Claude Code Stop hook still blocks on an unverified node (exit 2) with the
+  rewritten graph module.
+- Eight concurrent `add-node` processes all landed with no lost update.
+- `add_node` is rejected at `MAX_NODES` with the graph left intact.
