@@ -305,7 +305,7 @@ def _requires_copy(target: Path) -> bool:
     return target.parent.name == "agents" and target.suffix in {".md", ".toml"}
 
 
-def _target_matches(target: Path, source: Path) -> bool:
+def _target_matches(target: Path, source: Path, *, platform: str = os.name) -> bool:
     if is_link_like(target):
         return target.is_symlink() and target.resolve(strict=False) == source.resolve(
             strict=False
@@ -323,7 +323,7 @@ def _target_matches(target: Path, source: Path) -> bool:
         }
         return target_files == source_files
     return (
-        _requires_copy(target)
+        (_requires_copy(target) or platform == "nt")
         and target.is_file()
         and source.is_file()
         and _sha256(target) == _sha256(source)
@@ -561,10 +561,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         runtime_bin = runtime_bin.absolute()
         targets = _targets(home, install_root / "payload", runtime_bin)
         _preflight_user_paths(home, targets)
-        _preflight_targets(targets)
         if args.check:
             check(home, install_root, runtime_bin)
             return 0
+        _preflight_targets(targets)
         if args.dry_run and not runtime_bin.exists():
             print(
                 "dry-run: runtime would be created and client integrations "

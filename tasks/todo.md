@@ -29,6 +29,8 @@
 - [x] Review the final diff and installed state independently; resolve all
       critical and high findings.
 - [x] Commit and push repository changes after all checks pass.
+- [x] Repair the Windows copied-target regression found by GitHub Actions and
+      confirm the full cross-platform matrix passes.
 
 ## Review
 
@@ -42,12 +44,15 @@
 - Real clean-project E2E runs passed with Codex CLI 0.146.1, desktop Codex
   0.150.0-alpha.8, and Claude Code 2.1.239. Both clients discovered the global
   workflow and delegated independent verification successfully.
-- Automated verification passed: 115 tests (2 Windows-only skips), Black
+- Automated verification passed: 117 tests (2 Windows-only skips), Black
   26.5.1 across 22 files, strict mypy across 22 files, adapter sync, five-case
   offline evaluation, Claude adapter validation, compileall, installer drift
   check, and whitespace validation.
 - Independent code, security, and Python reviews report no remaining CRITICAL,
   HIGH, or MEDIUM findings.
+- The first GitHub Actions run exposed Windows-only copied-target matching and
+  check-order regressions. The repair keeps POSIX link ownership strict, matches
+  Windows copies by content, and keeps `--check` on its read-only drift path.
 
 ### Discovery record
 

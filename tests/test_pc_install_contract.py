@@ -295,6 +295,21 @@ class PcInstallContractTests(unittest.TestCase):
                 self._skill(self.claude, "graph-planning").read_text(encoding="utf-8"),
             )
 
+    def test_check_reports_regular_target_drift_instead_of_install_conflict(
+        self,
+    ) -> None:
+        self._install()
+        reviewer = self.codex / "agents" / "graph_reviewer.toml"
+        reviewer.write_text("drifted reviewer\n", encoding="utf-8")
+
+        checked = self._run("--check")
+
+        self.assertNotEqual(0, checked.returncode)
+        output = (checked.stdout + checked.stderr).lower()
+        self.assertIn("drift", output)
+        self.assertNotIn("unmanaged target conflict", output)
+        self.assertEqual("drifted reviewer\n", reviewer.read_text(encoding="utf-8"))
+
     def test_check_without_an_install_is_read_only(self) -> None:
         install_root = self.home / ".local/share/graph-engineering-agent-harness"
 
@@ -357,6 +372,17 @@ class PcInstallContractTests(unittest.TestCase):
             )
 
         self.assertEqual(1, len(observed_sources))
+
+    def test_windows_copied_runtime_executable_matches_by_content(self) -> None:
+        source = self.home / "source/graphctl.exe"
+        target = self.home / ".local/bin/graphctl.exe"
+        source.parent.mkdir()
+        target.parent.mkdir(parents=True)
+        source.write_bytes(b"managed executable\n")
+        target.write_bytes(source.read_bytes())
+
+        self.assertTrue(pc_installer._target_matches(target, source, platform="nt"))
+        self.assertFalse(pc_installer._target_matches(target, source, platform="posix"))
 
     @unittest.skipIf(os.name == "nt", "POSIX shell command execution")
     def test_stop_hook_exec_form_handles_runtime_paths_that_contain_spaces(
