@@ -13,3 +13,9 @@ external Git worktree explicitly.
 Recommended permissions are `workspace-write` for an executor and `read-only`
 for a reviewer. Never bypass approval or sandbox protections merely to run the
 harness.
+
+For user-scoped installation across repositories, run `scripts/install_pc.py`
+from the repository root. It installs the four skills under `~/.agents/skills`,
+the regular-file reviewer under `~/.codex/agents/graph_reviewer.toml`, and one
+small managed block in `~/.codex/AGENTS.md`. It does not modify Codex
+`config.toml` or replace other global instructions and agents.

@@ -56,6 +56,35 @@ If `py -3.10` is unavailable, install a supported Python release and substitute
 the exact interpreter path. Do not rely on an unrelated `python` command that
 may point to an older installation.
 
+### Install once for Codex and Claude Code on this computer
+
+Run the PC installer from a trusted checkout with Python 3.10 or newer. It
+creates an isolated runtime, exposes `graphctl` under the user's local bin
+directory, and merges the harness into existing user configuration instead of
+replacing it.
+
+```bash
+python3 scripts/install_pc.py --dry-run
+python3 scripts/install_pc.py
+python3 scripts/install_pc.py --check
+```
+
+The installer keeps one canonical skill payload under
+`~/.local/share/graph-engineering-agent-harness/`. On macOS and Linux, Codex and
+Claude Code skill directories link to that payload, so the procedure text is
+not duplicated. Reviewer definitions remain small regular files because the
+desktop-bundled Codex on this host failed to apply a linked user-agent profile.
+One marker-delimited instruction block is
+upserted in each global instruction file, and one Claude Stop hook is merged
+without replacing other hooks, permissions, plugins, or MCP configuration.
+
+Re-run the install command after updating this checkout. `--check` is read-only
+and reports drift. `--uninstall` removes only managed links, reviewer files,
+instruction blocks, and the hook; it retains the isolated runtime and
+timestamped configuration backups for rollback. An unmanaged same-name skill
+or agent is a hard conflict and causes the installer to stop before changing
+client config.
+
 ## Complete quick start
 
 The sample is intentionally non-sensitive and has one node so the walkthrough
@@ -116,6 +145,9 @@ and the read-only `.codex/agents/reviewer.toml`. Ask Codex to use the graph
 workflow and delegate verification to `graph_reviewer`. See
 `adapters/codex/README.md` for the fresh-session fallback and permissions.
 
+After a PC-wide install, the same skills and `graph_reviewer` are available in
+unrelated repositories; no project adapter copy is required.
+
 ## Run with Claude Code
 
 Open the repository with `claude` after creating or copying `task-graph.json`.
@@ -124,6 +156,10 @@ project skills and reviewer are under `.claude/`; the deterministic Stop hook is
 an opt-in settings example because hooks execute repository code. Use
 `--worktree` for isolated parallel writes where appropriate. See
 `adapters/claude/README.md`.
+
+After a PC-wide install, user-scoped skills, `graph-reviewer`, and the Stop hook
+are available in unrelated repositories. The hook exits immediately when no
+`task-graph.json` exists.
 
 ## Verification and retry
 

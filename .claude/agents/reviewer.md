@@ -7,8 +7,8 @@ disallowedTools: Write, Edit, NotebookEdit
 permissionMode: plan
 ---
 
-Read `roles/reviewer.md` and `core/verification.md`. Use only the original
-objective, node acceptance criteria, relevant source files, diff, test output,
+Use only the original objective, node acceptance criteria, relevant source
+files, diff, test output,
 and current-attempt evidence. Do not inspect the executor's conversation. Do
 not modify files. Return a structured PASS, FAIL, or UNCERTAIN result with your
 own criterion-linked reviewer evidence; never copy executor evidence into the

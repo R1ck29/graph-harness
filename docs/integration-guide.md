@@ -18,6 +18,26 @@ evidence kinds and adapter wrappers instead of editing state fields directly.
   generated diff. The adapter-local copies are retained so each adapter can be
   distributed independently without handwritten procedure forks.
 
+## User-scoped PC integration
+
+`scripts/install_pc.py` is the supported integration path when both clients
+must use the harness outside this repository. It owns one payload and one
+isolated Python runtime under the selected user's `.local/share` directory.
+Both clients reference the same canonical skill payload on POSIX systems;
+client-specific reviewer formats remain separate regular files.
+
+The installer performs a complete collision preflight before changing client
+configuration. It atomically upserts one marked block in Codex `AGENTS.md` and
+Claude `CLAUDE.md`, merges one Claude Stop hook, writes a hash receipt, and
+backs up only configuration files that actually change. Re-running it updates
+the owned payload without duplicating blocks, hooks, or backups. It never
+replaces an unmanaged same-name skill or reviewer.
+
+The global procedure is intentionally short and refers to the existing
+organization workflow instead of restating planning, TDD, review, or security
+rules. Organization-specific MCP servers, permissions, agents, and hooks stay
+outside the managed block and remain untouched.
+
 ## Extension points
 
 - Add a role procedure under `roles/`, keeping four active roles or fewer per

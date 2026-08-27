@@ -60,3 +60,9 @@ so they are edit isolation rather than a security boundary.
 Keep the graph in the primary checkout and run every `graphctl` command there;
 use the worktree only for the file edits of one node. A worktree with no graph
 makes the Stop hook exit successfully without checking anything.
+
+For user-scoped installation across repositories, run `scripts/install_pc.py`
+from the repository root. It installs shared skills, a regular-file
+`graph-reviewer`, and an installed-package Stop entry point, then merges one
+managed hook into user settings. Existing hooks, permissions, plugins, MCP
+servers, and global instructions outside the marked block are preserved.

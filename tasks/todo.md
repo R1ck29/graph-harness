@@ -1,105 +1,62 @@
-# Plan: close the four reported gaps
+# Plan: install the harness for Codex and Claude Code on this PC
 
-## 1. No CLI path to author a multi-node graph
-`graphctl init` creates exactly one node and refuses to overwrite, yet
-`graph-planning` tells the planner to build a DAG and `AGENTS.md` forbids
-editing the graph outside `graphctl`. The documented workflow was unreachable.
+## Discovery and design
 
-- [x] `Graph.add_node()` — build a candidate document, validate it, adopt it
-      only when validation passes, so a rejected addition is a no-op.
-- [x] `graphctl add-node NODE --description --criterion [--depends-on]
-      [--role] [--max-attempts]`.
-- [x] Update `roles/planner.md`, `skills/graph-planning/SKILL.md`, `README.md`,
-      `AGENTS.md`; regenerate adapter copies.
+- [x] Inventory the installed Codex and Claude Code versions, global discovery
+      paths, and existing harness-related configuration without exposing secrets.
+- [x] Map the repository's canonical skills, agents, CLI, and guard into a single
+      source-of-truth installation layout that does not duplicate existing files.
+- [x] Define backup, upgrade, uninstall, and rollback behavior before mutating
+      global configuration.
 
-## 2/3. `review_history` wedges the node at MAX_EVIDENCE
-At 512 archived UNCERTAIN reviews every transition is refused: `withdraw`,
-`submit`, `verify` (all three verdicts), and `retry`. The `verify` leg is a
-regression introduced by `_record_verification` in beb1a2d.
+## Implementation
 
-- [x] One `_archive_review()` helper shared by `withdraw_submission` and
-      `_record_verification` — removes the duplicated record construction and
-      drops the oldest record at the cap instead of refusing the append.
-
-## 4. Verification is point-in-time and nothing says so
-A verified node keeps its PASS after its files are rewritten by later work.
-The recovery mechanism already exists (`verify --fail --faulty-node ANCESTOR`),
-but the reviewer is never given the ancestor's reviewed file list, so the
-regression is invisible from the compact packet.
-
-- [x] `Graph.ancestors()` and `upstream_verified_files` in `review_packet`.
-- [x] State the point-in-time boundary and the reviewer's duty in
-      `core/verification.md`, `core/protocol.md`,
-      `skills/independent-verification/SKILL.md`.
+- [x] Add or repair an idempotent local installer if the repository cannot be
+      installed directly into both clients as-is.
+- [x] Add characterization and installer tests before changing installation
+      behavior.
+- [x] Install the Python CLI and both client adapters on this PC while preserving
+      unrelated user configuration.
 
 ## Verification
-- [x] Contract tests for each change, including the 512-entry wedge repro.
-- [x] `python -m unittest discover -v`, `black --check`, `mypy`,
-      `python scripts/sync_adapters.py --check`, `graphctl completion-check`.
-- [x] Independent subagent review.
+
+- [x] Verify Codex discovers the installed workflow and reviewer in a clean
+      temporary project and completes a real graph review path.
+- [x] Verify Claude Code discovers the installed workflow and reviewer in a clean
+      temporary project and completes a real graph review path.
+- [x] Run the complete unit, formatting, typing, adapter-sync, security, and
+      installation test suite.
+- [x] Review the final diff and installed state independently; resolve all
+      critical and high findings.
+- [x] Commit and push repository changes after all checks pass.
 
 ## Review
 
-All three gaps are closed and exercised end to end.
+- The installer is idempotent and read-only in `--check` mode, rejects target
+  conflicts before creating a runtime, builds from an isolated staging copy,
+  preserves unrelated configuration, and removes only exact managed entries.
+- The PC install is in sync. Both clients reference one shared canonical skill
+  payload, while their reviewer profiles remain regular client-specific files.
+  Codex and Claude instruction files each have one managed block, and Claude has
+  one shell-free Stop hook entry.
+- Real clean-project E2E runs passed with Codex CLI 0.146.1, desktop Codex
+  0.150.0-alpha.8, and Claude Code 2.1.239. Both clients discovered the global
+  workflow and delegated independent verification successfully.
+- Automated verification passed: 115 tests (2 Windows-only skips), Black
+  26.5.1 across 22 files, strict mypy across 22 files, adapter sync, five-case
+  offline evaluation, Claude adapter validation, compileall, installer drift
+  check, and whitespace validation.
+- Independent code, security, and Python reviews report no remaining CRITICAL,
+  HIGH, or MEDIUM findings.
 
-- `graphctl add-node` builds a DAG through the CLI; a rejected addition
-  (duplicate id, unknown dependency, bad identifier, no criteria) is validated
-  against a candidate document and leaves the graph byte-identical.
-- The 512-entry wedge is gone on both legs. A node with a full trail can still
-  be withdrawn, resubmitted, and given any verdict; the trail keeps the newest
-  512 records.
-- `review-packet` names each verified ancestor's reviewed files. The live run
-  confirmed the intended recovery: the packet surfaced the shared file, the
-  reviewer failed with `--faulty-node design`, the ancestor reopened, and the
-  descendant was invalidated with its unspent attempt refunded.
+### Discovery record
 
-### Follow-ups from the independent review
-
-- The executor procedure never asked for `--relevant-file`, so the new packet
-  field would have been empty in a graph built by the book. `graph-execution`
-  now requires it and `core/verification.md` states what the packet actually
-  lists.
-- `graphctl init` had no `--description` or `--max-attempts`, so the root node
-  of a DAG restated the whole objective and was the one node whose budget could
-  not be set. Both now match `add-node`.
-- `agent_harness/evals.py` carried its own copy of the ancestor walk; it now
-  calls `Graph.ancestors`.
-- The count bound alone did not keep a node movable. Sixty-three withdraw
-  cycles with large evidence pushed the document past the storage layer's 4 MiB
-  ceiling, after which every transition failed to save and the whole graph
-  froze. The archive is now bounded by serialized size as well: 200 cycles peak
-  at ~1 MB, and a single oversized record is dropped rather than wedging.
-- `ReviewHistoryBoundTests` rebuilt its 512-record fixture per test. Building it
-  once took the suite from 11.0s to 6.6s.
-- `mypy` failed at HEAD on any 3.11+ machine because the `tomllib` ignore only
-  covered the 3.10 error code. CI runs 3.10 and never saw it.
-
-Checks: 102 tests on 3.8, 3.11, and 3.13; `black --check`; `mypy --strict`;
-`sync_adapters.py --check`; two end-to-end CLI runs; independent subagent
-review of the diff.
-
-### Considered and not done
-
-- Binding a verification to file hashes. Detecting drift needs a way to reopen
-  a verified node for re-review, which does not exist, so a drifted graph would
-  fail `completion-check` forever -- the same class of wedge this change set
-  removes. The packet field routes the same problem into the working
-  `--faulty-node` path instead.
-- Refusing `verify --pass` when `relevant_files` is empty. It would invalidate
-  existing graphs for a procedural omission the skill now prevents.
-
-## Remaining items closed
-
-- **Codex was never exercised end to end.** It is now: a read-only `codex exec`
-  session reviewed an awaiting node in a self-contained checkout and reported
-  PASS with its own evidence, without writing or self-recording. It also acted
-  on `upstream_verified_files`, so the reviewer-facing half of the staleness
-  fix works in the client that was never tested. Recorded in
-  `docs/platform-compatibility.md`.
-- Clean-install quick start (`pip install .`, README commands verbatim) reaches
-  `{"complete": true}`, and `add-node` then extends the finished graph, the new
-  node going straight to `ready`.
-- The Claude Code Stop hook still blocks on an unverified node (exit 2) with the
-  rewritten graph module.
-- Eight concurrent `add-node` processes all landed with no lost update.
-- `add_node` is rejected at `MAX_NODES` with the graph left intact.
+- Installed clients: Codex CLI 0.146.1 in the login shell (the desktop bundle
+  carries 0.150.0-alpha.8) and Claude Code 2.1.239.
+- The current adapter is project-scoped: its skills, reviewers, and Stop hook
+  refer to files under the opened repository, and `graphctl` is not globally
+  installed. Direct copying would fail in an unrelated checkout.
+- The integration will use one managed payload, symlink both client skill trees
+  to that payload on this Mac, merge one marked instruction block per client,
+  merge one Claude Stop hook, preserve unrelated configuration, and provide
+  check/uninstall behavior with backups for displaced same-name targets.

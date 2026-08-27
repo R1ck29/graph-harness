@@ -7,6 +7,7 @@ license = { text = "MIT" }
 
 [project.scripts]
 graphctl = "agent_harness.cli:main"
+graphctl-claude-stop = "agent_harness.claude_hook:entrypoint"
 
 [project.optional-dependencies]
 # Static checks only; the harness itself runs on the standard library. Pinned

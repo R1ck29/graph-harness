@@ -29,6 +29,23 @@ must exactly match canonical skills. Claude hooks are opt-in because enabling a
 project hook executes local repository code. The example hook has no network
 calls or write operations.
 
+The PC installer only writes beneath the selected user home, rejects symlinked
+configuration parents, refuses unmanaged same-name targets before any client
+configuration change, and uses atomic replacement for files it owns. Existing
+configuration is parsed before mutation and backed up when it changes. On
+POSIX, skills link to one owned payload; client agent definitions are regular
+files because the desktop-bundled Codex tested here failed to apply a linked
+profile. Uninstall removes
+an owned link only when it still resolves to the managed payload and removes a
+regular reviewer only when its hash still matches, so a user replacement is not
+silently deleted.
+
+The global Claude Stop hook runs the installed `graphctl-claude-stop` entry
+point from a dedicated Python environment. It does not import code from the
+repository being reviewed. It returns immediately when that repository has no
+`task-graph.json`; when a graph exists it applies the same bounded, offline
+completion check as the project adapter.
+
 The harness does not auto-approve destructive commands, bypass sandboxes, or
 require external services. It does persist submitted and reviewer evidence in
 the graph, archives prior-attempt evidence during retry, and archives each

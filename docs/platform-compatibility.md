@@ -1,6 +1,6 @@
 # Client and operating-system compatibility
 
-Verified on 2026-08-25 against official documentation and the installed CLIs.
+Verified on 2026-08-27 against official documentation and the installed CLIs.
 The deterministic core has no platform imports, API calls, or network need.
 
 ## Operating systems
@@ -20,12 +20,17 @@ workflow.
 
 ## Codex
 
-Local version: `codex-cli 0.146.1`.
+Local versions: login-shell `codex-cli 0.146.1`; desktop-bundled
+`codex-cli 0.150.0-alpha.8`.
 
 - Codex loads root-to-current `AGENTS.md` instructions and gives
   `AGENTS.override.md` precedence within each directory.
 - Repository skills are discovered under `.agents/skills/**/SKILL.md` and load
   progressively.
+- User skills are discovered under `~/.agents/skills/`, and user custom agents
+  under `~/.codex/agents/`. The PC installer links both clients to one skill
+  payload but keeps the Codex reviewer profile as a regular file for
+  compatibility with the desktop-bundled build tested here.
 - Current local releases enable multi-agent workflows; project custom agents
   live in `.codex/agents/*.toml`. The reviewer adapter is read-only.
 - The CLI exposes `read-only`, `workspace-write`, and `danger-full-access`
@@ -39,6 +44,12 @@ Local version: `codex-cli 0.146.1`.
   verdict with its own evidence and reviewer identity without running
   `graphctl verify` or writing any file. The main session then recorded that
   verdict verbatim.
+- A user-scoped round trip was exercised from an unrelated temporary Git
+  repository on 2026-08-27. Codex loaded the global skills, delegated the
+  awaiting node to the installed `graph_reviewer`, recorded its evidence in the
+  main session, and reached `{"complete": true}`. A separate read-only probe
+  confirmed the desktop-bundled 0.150 build can also delegate to the regular
+  global reviewer profile.
 
 Sources: [AGENTS.md](https://developers.openai.com/codex/guides/agents-md),
 [skills](https://developers.openai.com/codex/skills),
@@ -52,6 +63,9 @@ Local version: `2.1.239 (Claude Code)`.
 - Claude Code reads `CLAUDE.md`, not `AGENTS.md`; the adapter uses the official
   `@AGENTS.md` import pattern.
 - Project skills and agents live in `.claude/skills/` and `.claude/agents/`.
+- User skills and agents live in `~/.claude/skills/` and `~/.claude/agents/`.
+  The PC installer shares the skill payload with Codex and installs a regular
+  `graph-reviewer` profile.
 - Project hooks/settings live in `.claude/settings.json`. The adapter includes
   an opt-in Stop hook example that runs a deterministic local completion check
   and performs no writes.
@@ -71,6 +85,13 @@ Local version: `2.1.239 (Claude Code)`.
 - Plugin packaging is supported, but v1 uses project-scoped standalone config
   to stay small. The canonical `skills/` tree can later be put in a plugin
   without changing core semantics.
+- A user-scoped round trip was exercised from an unrelated temporary Git
+  repository on 2026-08-27. Claude Code loaded `independent-verification`,
+  delegated to the installed `graph-reviewer`, independently checked the
+  one-line artifact at byte level, recorded the returned PASS in the main
+  session, and reached `{"complete": true}`. The installed Stop hook then
+  exited 0; the pre-existing `SessionStart` and `PostToolUse` hooks remained
+  present and unchanged in count.
 
 Sources: [memory and CLAUDE.md](https://code.claude.com/docs/en/memory),
 [extensions](https://code.claude.com/docs/en/features-overview),
