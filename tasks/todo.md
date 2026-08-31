@@ -1,14 +1,59 @@
-# Plan: make session conformance observable
+# Plan: observe conformance from a signal that cannot mistake a pull for work
 
-The previous plan, installing the harness for Codex and Claude Code on this PC,
-is complete. Its record is in git history and in
+Objective: judge a session on direct evidence that it changed code, and report
+what the harness itself catches.
+
+Design: `docs/superpowers/specs/2026-08-31-conformance-redesign-design.md`.
+Step plan: `docs/superpowers/plans/2026-08-31-conformance-redesign.md`.
+Executable plan: `task-graph.json` (7 nodes), which is the authority for status.
+
+- [ ] `edit-events` — record an editing tool call, never a path or its contents.
+- [ ] `bypass-signal` — judge on edit events and dirty-tree differences; a head
+      move becomes context, never evidence.
+- [ ] `installer-hook` — manage the edit hook on both clients.
+- [ ] `escape-hatches` — `grant-attempt` and `supersede`, so a person's decision
+      is recorded rather than hand-edited.
+- [ ] `effectiveness` — count what independent review caught, what rework cost,
+      and how often the protocol was followed.
+- [ ] `docs` — describe the signal the code actually uses, blind spot included.
+- [ ] `gate` — the full local verification gate.
+
+## The objective this replaces, and why
+
+The record below is kept whole. It is the reason the design changed, and
+deleting it would make the new graph look better than it earned.
+
+The previous objective — make session conformance observable — reached 7 of 11
+nodes verified. Its `bypass-report` node failed three independent reviews and
+was retired at 3 of 3 attempts. Rounds 1 and 2 were ordinary bugs and were
+fixed. Round 3 was not: `git pull` and `git checkout` were reported as protocol
+bypasses, because the signal was a `HEAD` move, which cannot distinguish
+authored work from work that arrived from somewhere else.
+
+The graph for that objective is archived at
+`task-graph.superseded-2026-08-31.json` with all three failures intact.
+Rebuilding reset the attempt budgets. That is stated plainly because this
+session refused to do exactly that three hours earlier when the motive would
+have been to escape a budget; it happened here because the user directed a
+design change, and the failures remain readable in the archive, in the reviews
+under `tasks/artifacts/`, and in the section below.
+
+The seven verified nodes' code is reused unchanged: `journal-core`, `snapshot`,
+`cli-transitions`, `codex-reader`, `doctor-ext`, `session-records`, `installer`.
+
+---
+
+# Superseded plan: make session conformance observable
+
+The plan before that one, installing the harness for Codex and Claude Code on
+this PC, is complete. Its record is in git history and in
 `task-graph.completed-2026-08-27.json`.
 
 Objective: make harness protocol conformance observable across every Claude Code
 and Codex session, without blocking work.
 
 Design: `docs/superpowers/specs/2026-08-30-session-conformance-design.md`.
-Executable plan: `task-graph.json` (10 nodes), which is the authority for status.
+Executable plan: `task-graph.superseded-2026-08-31.json`.
 
 ## Plan
 
@@ -23,7 +68,8 @@ Executable plan: `task-graph.json` (10 nodes), which is the authority for status
 - [x] `doctor-ext` — journal and hook liveness without breaking the contract.
 - [x] `session-records` — session and turn boundaries, one repository key.
 - [x] `installer` — manage the new hook entries on both clients.
-- [ ] `bypass-report` — decide and report a bypass. **Attempt budget exhausted.**
+- [ ] `bypass-report` — decide and report a bypass. Attempt 3 failed on one
+      criterion of five. **Budget exhausted again at 3 of 3.**
 - [ ] `conformance-cmd` — written and tested; blocked on `bypass-report`.
 - [ ] `docs` — written; blocked on `conformance-cmd`.
 - [ ] `gate` — blocked.
@@ -31,10 +77,82 @@ Executable plan: `task-graph.json` (10 nodes), which is the authority for status
 The `hooks` node was split after it exhausted its budget: both failures were in
 deciding and reporting a bypass, while recording boundaries passed its criteria
 in both rounds. `session-records` owns the recording and is verified;
-`bypass-report` owns the judgement and has now exhausted its own budget in
-turn. The graph was rebuilt once for that split, carrying every recorded
-verdict across verbatim; it has not been rebuilt again, because resetting an
-attempt budget by rebuilding would defeat the thing the budget is for.
+`bypass-report` owns the judgement and exhausted its own budget in turn. The
+graph was rebuilt once for that split, carrying every recorded verdict across
+verbatim; it has not been rebuilt again, because resetting an attempt budget by
+rebuilding would defeat the thing the budget is for.
+
+## The budget grant, and the gap it exposed
+
+`bypass-report` reached `max_attempts` and the protocol says to stop and
+escalate rather than reset counters. The escalation was made and the user
+answered it: give the node one more attempt and finish the verification by the
+normal procedure. `max_attempts` was raised from 2 to 3 on that node alone.
+`attempts` was not touched and stands at 3 after the retry, so the two recorded
+failures are still on the record and still count.
+
+That change had to be made by hand, because the harness has no supported way to
+record the outcome of its own escalation: `graphctl` can refuse an attempt but
+cannot be told that a human granted one, and `retry` refuses before any of this
+can be expressed. A `graphctl` command that records a granted attempt with the
+grantor and the reason — so the grant is as visible as the failures it follows —
+is the missing piece. It is deliberately not built here; adding a way for the
+agent to widen its own budget in the middle of being budget-limited is the one
+change that should not be made by the agent that wants it.
+
+## What attempt 3 found
+
+The granted attempt was spent, and it bought a real answer rather than a
+formality. The attempt-2 concurrency defect is closed and was confirmed closed
+by a reviewer that wrote its own twelve-process racer and showed both the
+positional cut and the file lock are load-bearing by removing each in turn. Four
+of the five criteria passed on that evidence.
+
+The fifth failed, on something no earlier round had looked at:
+
+> committed work is sized from the commits themselves, so a pull, a checkout or
+> a one-line commit is not reported
+
+`committed_size` runs `git diff --shortstat` between the two recorded heads,
+which measures a pulled or checked-out diff exactly as it measures work the
+session authored. Confirmed here directly: in a real clone, a `git pull
+--ff-only` of two upstream files of forty lines each, with the session doing
+nothing else, gives `change_size (0, 0)`, `committed_size (2, 80)` and
+`worth_reporting (True, 2, 80)`, so the next session start accuses someone who
+only ran `git pull`. A branch checkout does the same. Of the three sources the
+criterion names, only the one-line commit is prevented, and the pre-existing
+size threshold is what prevents it.
+
+The design intent was wrong, not just the implementation: sizing from commits
+does not keep a pull below the threshold, because a pull's diff is exactly as
+large as the work it brings. Nothing in the module discriminates the *origin* of
+a `HEAD` move; there is no `merge-base`, `rev-list`, `is-ancestor` or committer
+check anywhere in `agent_harness/`.
+
+Two shipped statements assert the property the code does not have and are
+therefore also false: `docs/conformance.md:84-86` and the `committed_size`
+docstring.
+
+No test in the 247-test suite performs a pull or a checkout. The test named in
+the submitted evidence, `test_a_pull_sized_head_move_is_not_reported`, makes a
+local one-line commit and no pull. The suite is green; the gap was in coverage.
+
+The full review is in `tasks/artifacts/bypass-report-attempt-3-review.md`, the
+mutation record in `tasks/artifacts/bypass-report-attempt-3-mutations.md`.
+
+## What a fourth attempt would have to do
+
+1. Discriminate the origin of a head move: refuse a move whose new head is not
+   a descendant of the old, and count only commits whose committer matches the
+   local identity and whose committer date falls inside the session window.
+   Fall back to silence when the origin cannot be established, which is the
+   direction this module errs in everywhere else.
+2. Add tests that perform a real pull from a real upstream clone and a real
+   branch checkout, both well above `WARN_MIN_FILES` and `WARN_MIN_LINES`.
+3. Correct `docs/conformance.md:84-86` and the `committed_size` docstring.
+
+That attempt is not open. The node is at 3 of 3 and the same escalation applies:
+whether to grant a fourth is the user's decision, not this session's.
 
 ## What the harness could not answer before this work
 

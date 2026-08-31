@@ -1,0 +1,53 @@
+test_a_budget_exhausted_snapshot_is_marked_degraded (tests.test_session_hook_contract.SessionHookTests.test_a_budget_exhausted_snapshot_is_marked_degraded) ... ok
+test_a_bypass_already_reported_is_skipped_and_an_older_one_is_found (tests.test_session_hook_contract.SessionHookTests.test_a_bypass_already_reported_is_skipped_and_an_older_one_is_found) ... ok
+test_a_bypass_is_reported_once_and_not_after_a_later_session (tests.test_session_hook_contract.SessionHookTests.test_a_bypass_is_reported_once_and_not_after_a_later_session) ... ok
+test_a_corrupt_count_neither_raises_nor_silences_the_repository (tests.test_session_hook_contract.SessionHookTests.test_a_corrupt_count_neither_raises_nor_silences_the_repository) ... ok
+test_a_degraded_observation_is_not_treated_as_evidence (tests.test_session_hook_contract.SessionHookTests.test_a_degraded_observation_is_not_treated_as_evidence) ... ok
+test_a_forged_head_is_never_passed_to_git (tests.test_session_hook_contract.SessionHookTests.test_a_forged_head_is_never_passed_to_git) ... ok
+test_a_graphctl_run_from_a_subdirectory_still_counts (tests.test_session_hook_contract.SessionHookTests.test_a_graphctl_run_from_a_subdirectory_still_counts) ... ok
+test_a_graphctl_run_recorded_late_still_counts_for_its_session (tests.test_session_hook_contract.SessionHookTests.test_a_graphctl_run_recorded_late_still_counts_for_its_session) ... ok
+test_a_graphctl_run_still_counts_when_no_session_has_an_identifier (tests.test_session_hook_contract.SessionHookTests.test_a_graphctl_run_still_counts_when_no_session_has_an_identifier) ... ok
+test_a_graphctl_run_without_a_client_session_id_still_counts (tests.test_session_hook_contract.SessionHookTests.test_a_graphctl_run_without_a_client_session_id_still_counts) ... ok
+test_a_malformed_snapshot_is_not_treated_as_a_bypass (tests.test_session_hook_contract.SessionHookTests.test_a_malformed_snapshot_is_not_treated_as_a_bypass) ... ok
+test_a_prior_bypass_above_the_threshold_is_reported_at_the_next_start (tests.test_session_hook_contract.SessionHookTests.test_a_prior_bypass_above_the_threshold_is_reported_at_the_next_start) ... ok
+test_a_pull_sized_head_move_is_not_reported (tests.test_session_hook_contract.SessionHookTests.test_a_pull_sized_head_move_is_not_reported) ... ok
+test_a_question_session_afterwards_does_not_bury_a_bypass (tests.test_session_hook_contract.SessionHookTests.test_a_question_session_afterwards_does_not_bury_a_bypass) ... ok
+test_a_recording_failure_cannot_change_the_stop_verdict (tests.test_session_hook_contract.SessionHookTests.test_a_recording_failure_cannot_change_the_stop_verdict) ... ok
+test_a_report_that_cannot_be_recorded_is_not_printed (tests.test_session_hook_contract.SessionHookTests.test_a_report_that_cannot_be_recorded_is_not_printed) ... ok
+test_a_session_in_another_repository_is_not_reported (tests.test_session_hook_contract.SessionHookTests.test_a_session_in_another_repository_is_not_reported) ... ok
+test_a_session_is_not_judged_on_the_records_it_just_wrote (tests.test_session_hook_contract.SessionHookTests.test_a_session_is_not_judged_on_the_records_it_just_wrote) ... ok
+test_a_session_reached_through_a_symlink_is_not_falsely_accused (tests.test_session_hook_contract.SessionHookTests.test_a_session_reached_through_a_symlink_is_not_falsely_accused) ... ok
+test_a_session_that_never_finished_is_not_reported (tests.test_session_hook_contract.SessionHookTests.test_a_session_that_never_finished_is_not_reported) ... ok
+test_a_session_that_used_the_graph_is_not_reported (tests.test_session_hook_contract.SessionHookTests.test_a_session_that_used_the_graph_is_not_reported) ... ok
+test_a_stale_report_lock_does_not_stall_every_session_start (tests.test_session_hook_contract.SessionHookTests.test_a_stale_report_lock_does_not_stall_every_session_start) ... ok
+test_a_timestampless_session_cannot_hijack_the_selection (tests.test_session_hook_contract.SessionHookTests.test_a_timestampless_session_cannot_hijack_the_selection) ... ok
+test_a_timestampless_transition_cannot_silence_every_report (tests.test_session_hook_contract.SessionHookTests.test_a_timestampless_transition_cannot_silence_every_report) ... ok
+test_a_transition_outside_the_session_window_does_not_silence_it (tests.test_session_hook_contract.SessionHookTests.test_a_transition_outside_the_session_window_does_not_silence_it) ... ok
+test_a_trivial_change_is_recorded_but_not_reported (tests.test_session_hook_contract.SessionHookTests.test_a_trivial_change_is_recorded_but_not_reported) ... ok
+test_a_trivial_session_afterwards_does_not_bury_a_bypass (tests.test_session_hook_contract.SessionHookTests.test_a_trivial_session_afterwards_does_not_bury_a_bypass) ... ok
+test_all_three_producers_agree_on_the_repository_key (tests.test_session_hook_contract.SessionHookTests.test_all_three_producers_agree_on_the_repository_key) ... ok
+test_an_end_recorded_before_its_open_is_left_alone (tests.test_session_hook_contract.SessionHookTests.test_an_end_recorded_before_its_open_is_left_alone) ... ok
+test_an_oversized_payload_is_refused (tests.test_session_hook_contract.SessionHookTests.test_an_oversized_payload_is_refused) ... ok
+test_an_unsupported_interpreter_still_fails_closed (tests.test_session_hook_contract.SessionHookTests.test_an_unsupported_interpreter_still_fails_closed) ... Graph guard needs Python 3.10 or newer but the configured hook command ran 3.8.5 from /Users/rick/Documents/ChatGPT/LLM/agent-harness/.venv/bin/python. Point the Stop hook command at the interpreter used to install the harness, such as .venv/bin/python, then stop again.
+Graph guard needs Python 3.10 or newer but the configured hook command ran 3.8.5 from /Users/rick/Documents/ChatGPT/LLM/agent-harness/.venv/bin/python. Point the Stop hook command at the interpreter used to install the harness, such as .venv/bin/python, then stop again.
+ok
+test_an_unusable_payload_records_nothing_and_does_not_fail (tests.test_session_hook_contract.SessionHookTests.test_an_unusable_payload_records_nothing_and_does_not_fail) ... ok
+test_committed_work_is_reported_though_it_leaves_no_dirty_files (tests.test_session_hook_contract.SessionHookTests.test_committed_work_is_reported_though_it_leaves_no_dirty_files) ... ok
+test_dirt_present_before_the_session_is_not_charged_to_it (tests.test_session_hook_contract.SessionHookTests.test_dirt_present_before_the_session_is_not_charged_to_it) ... ok
+test_either_threshold_alone_triggers_the_report (tests.test_session_hook_contract.SessionHookTests.test_either_threshold_alone_triggers_the_report) ... ok
+test_neither_hook_can_be_made_to_raise (tests.test_session_hook_contract.SessionHookTests.test_neither_hook_can_be_made_to_raise) ... ok
+test_session_start_and_end_record_their_boundaries (tests.test_session_hook_contract.SessionHookTests.test_session_start_and_end_record_their_boundaries) ... ok
+test_the_most_recent_bypass_is_the_one_reported (tests.test_session_hook_contract.SessionHookTests.test_the_most_recent_bypass_is_the_one_reported) ... ok
+test_the_scan_does_not_reach_back_indefinitely (tests.test_session_hook_contract.SessionHookTests.test_the_scan_does_not_reach_back_indefinitely) ... ok
+test_the_scan_stops_at_a_session_that_used_the_graph (tests.test_session_hook_contract.SessionHookTests.test_the_scan_stops_at_a_session_that_used_the_graph) ... The previous session in this repository changed 2 file(s) and 39 line(s) without recording any task-graph state. If that work was non-trivial it should have gone through graphctl. Run 'graphctl conformance' for the full picture.
+ok
+test_the_stop_hook_records_a_turn_and_keeps_its_exit_codes (tests.test_session_hook_contract.SessionHookTests.test_the_stop_hook_records_a_turn_and_keeps_its_exit_codes) ... ok
+test_the_stop_hook_returns_early_when_already_active (tests.test_session_hook_contract.SessionHookTests.test_the_stop_hook_returns_early_when_already_active) ... ok
+test_the_stop_hook_still_refuses_an_incomplete_graph (tests.test_session_hook_contract.SessionHookTests.test_the_stop_hook_still_refuses_an_incomplete_graph) ... Graph completion is not verified: graph is not complete; unverified nodes: ['task']. Continue the protocol or ask the user to pause explicitly.
+ok
+test_two_starts_at_once_report_one_bypass_between_them (tests.test_session_hook_contract.SessionHookTests.test_two_starts_at_once_report_one_bypass_between_them) ... ok
+
+----------------------------------------------------------------------
+Ran 44 tests in 19.181s
+
+OK
