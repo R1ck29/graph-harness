@@ -51,6 +51,27 @@ Local versions: login-shell `codex-cli 0.146.1`; desktop-bundled
   confirmed the desktop-bundled 0.150 build can also delegate to the regular
   global reviewer profile.
 
+- Hooks are documented for Codex with the same event set and the same standard
+  input payload as Claude Code, and `~/.codex/hooks.json` is parsed: an entry
+  with an out-of-range timeout draws a clamping warning. **They did not
+  execute.** Four probes on 2026-08-30 and 2026-08-31, against login-shell
+  `codex-cli` 0.146.1 and the desktop-bundled 0.151.0-alpha.7.1, defined a hook
+  on every documented event whose command appended a line to a file, and no
+  command ever ran, under both `read-only` and writable sandboxes.
+
+  Reproduction: write a `hooks.json` under a temporary `CODEX_HOME` giving each
+  event a command such as `printf "%s\n" "&lt;event&gt;" >> /tmp/probe.log`, run
+  `codex exec --skip-git-repo-check "Say OK"` with `CODEX_HOME` pointing at it,
+  and read the file. The configuration is parsed and the run completes; the
+  file stays empty.
+
+  The harness installs the entries regardless, since they cost nothing while
+  this holds and become live if it changes. Because a Codex session's working
+  tree is therefore never observed, `graphctl conformance` recovers Codex
+  sessions from `~/.codex/state_*.sqlite` — metadata only, no message content —
+  and reports them as `bypass_suspected`. `graphctl doctor` reports Codex as
+  never observed until a client actually runs the hooks.
+
 Sources: [AGENTS.md](https://developers.openai.com/codex/guides/agents-md),
 [skills](https://developers.openai.com/codex/skills),
 [subagents](https://developers.openai.com/codex/multi-agent), and

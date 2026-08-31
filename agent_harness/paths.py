@@ -4,10 +4,18 @@ from __future__ import annotations
 
 import os
 import stat
+import subprocess
 import tempfile
 from pathlib import Path
 
 from .errors import HarnessError
+
+INSTALL_DIRECTORY = Path(".local/share/graph-engineering-agent-harness")
+HOME_VARIABLE = "GRAPH_HARNESS_HOME"
+
+# The key is derived inside a session hook on a short budget, so asking git
+# for the top level is bounded rather than trusted to return.
+GIT_KEY_TIMEOUT_SECONDS = 2.0
 
 
 def is_link_like(path: Path) -> bool:
@@ -54,6 +62,95 @@ def workspace_path(
         ) from exc
     current = workspace
     for part in relative.parts:
+        current = current / part
+        if is_link_like(current):
+            raise HarnessError(
+                f"link-like (symlink or junction) paths are not allowed: {current}"
+            )
+    return candidate
+
+
+def repository_key(value: str | os.PathLike[str] | None = None) -> str:
+    """Return one name for the repository a record belongs to.
+
+    Records about a single session are written by three different processes:
+    a session hook, a turn hook, and the CLI. They are matched to each other
+    by this string, so every producer must derive the same value from a
+    different starting point. Two things make that true.
+
+    The repository's top level is used when there is one, because the session
+    hooks start from the project directory while the CLI starts from wherever
+    the command was run; keyed on the directory itself, a ``graphctl`` call
+    from a subdirectory would never match its own session.
+
+    The path is then resolved, because a project reached through a symlink —
+    the normal case under ``/tmp`` or ``/var`` on macOS — otherwise yields two
+    names for one directory.
+    """
+
+    try:
+        start = Path(value) if value is not None else Path.cwd()
+    except OSError:
+        return ""
+    try:
+        completed = subprocess.run(
+            ("git", "-C", str(start), "rev-parse", "--show-toplevel"),
+            capture_output=True,
+            text=True,
+            timeout=GIT_KEY_TIMEOUT_SECONDS,
+            check=False,
+        )
+        if completed.returncode == 0 and completed.stdout.strip():
+            start = Path(completed.stdout.strip())
+    except (OSError, ValueError, subprocess.SubprocessError):
+        # ValueError covers a path holding an embedded null byte, which
+        # subprocess rejects before it reaches git. Every caller records
+        # rather than acts, so a key that cannot be derived must degrade
+        # here rather than depend on each of them wrapping this call.
+        pass
+    try:
+        return str(start.resolve())
+    except (OSError, ValueError):
+        return str(start)
+
+
+def selected_home() -> Path:
+    """Return the home directory that owns installed harness state.
+
+    ``GRAPH_HARNESS_HOME`` exists so tests and a relocated installation can
+    point the library at a different tree.  It is read once per call rather
+    than cached so a test can change it between cases.
+    """
+
+    override = os.environ.get(HOME_VARIABLE)
+    return Path(override).resolve() if override else Path.home().resolve()
+
+
+def user_data_path(
+    relative: str | os.PathLike[str], home: str | os.PathLike[str] | None = None
+) -> Path:
+    """Resolve a path inside the installed data directory beneath the home.
+
+    The workspace confinement in :func:`workspace_path` deliberately refuses
+    every path outside the current directory, so it cannot describe installed
+    state.  This applies the same component walk re-rooted at the home the
+    installer owns, which keeps the one home-directory writer in the library
+    under the rule the installer already follows.
+    """
+
+    root = Path(home).resolve() if home is not None else selected_home()
+    install_root = root / INSTALL_DIRECTORY
+    candidate = Path(os.path.abspath(install_root / Path(relative)))
+    try:
+        candidate.relative_to(install_root)
+        parts = candidate.relative_to(root).parts
+    except ValueError as exc:
+        raise HarnessError(
+            f"path escapes the selected home: {candidate}; harness state stays "
+            f"under {install_root}"
+        ) from exc
+    current = root
+    for part in parts:
         current = current / part
         if is_link_like(current):
             raise HarnessError(

@@ -23,6 +23,9 @@ Objective -> Planner -> Task Graph -> Executor/Specialist -> Reviewer
 contract. `roles/` and `skills/` hold on-demand procedures. `.codex/`,
 `.claude/`, and `adapters/` map equivalent behavior to each client.
 
+New to this? [docs/how-it-works.md](docs/how-it-works.md) explains the whole
+repository in plain language, with no programming knowledge assumed.
+
 ## Before you start
 
 Requires Python 3.10 or newer.

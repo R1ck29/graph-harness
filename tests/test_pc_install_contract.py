@@ -41,6 +41,8 @@ class PcInstallContractTests(unittest.TestCase):
         suffix = ".exe" if os.name == "nt" else ""
         self.graphctl = self._fake_executable(f"graphctl{suffix}")
         self.stop_guard = self._fake_executable(f"graphctl-claude-stop{suffix}")
+        self.session_start = self._fake_executable(f"graphctl-session-start{suffix}")
+        self.session_end = self._fake_executable(f"graphctl-session-end{suffix}")
 
     def _fake_executable(self, name: str) -> Path:
         executable = self.runtime_bin / name
@@ -108,6 +110,104 @@ class PcInstallContractTests(unittest.TestCase):
                 }:
                     commands.append(command)
         return commands
+
+    def _codex_hooks(self) -> dict[str, Any]:
+        return cast(
+            "dict[str, Any]",
+            json.loads((self.codex / "hooks.json").read_text(encoding="utf-8")),
+        )
+
+    @staticmethod
+    def _managed_events(document: dict[str, Any]) -> dict[str, list[str]]:
+        """Return the managed command installed under each hook event."""
+
+        managed: dict[str, list[str]] = {}
+        for event, matchers in document.get("hooks", {}).items():
+            for matcher in matchers if isinstance(matchers, list) else []:
+                for hook in (
+                    matcher.get("hooks", []) if isinstance(matcher, dict) else []
+                ):
+                    command = hook.get("command")
+                    if isinstance(command, str) and Path(command).stem in {
+                        "graphctl-claude-stop",
+                        "graphctl-session-start",
+                        "graphctl-session-end",
+                    }:
+                        managed.setdefault(event, []).append(command)
+        return managed
+
+    def test_every_managed_event_is_installed_on_both_clients(self) -> None:
+        self._install()
+
+        for document in (self._settings(), self._codex_hooks()):
+            managed = self._managed_events(document)
+            self.assertEqual(
+                {"SessionStart", "Stop", "SessionEnd"},
+                set(managed),
+                document,
+            )
+            self.assertEqual([str(self.session_start)], managed["SessionStart"])
+            self.assertEqual([str(self.stop_guard)], managed["Stop"])
+            self.assertEqual([str(self.session_end)], managed["SessionEnd"])
+
+    def test_a_repeated_install_adds_no_second_entry_to_any_event(self) -> None:
+        self._install()
+        self._install()
+
+        for document in (self._settings(), self._codex_hooks()):
+            for event, commands in self._managed_events(document).items():
+                self.assertEqual(1, len(commands), f"{event}: {commands}")
+
+    def test_unrelated_codex_hooks_survive_install_and_uninstall(self) -> None:
+        self.codex.mkdir(parents=True, exist_ok=True)
+        original: dict[str, dict[str, Any]] = {
+            "hooks": {
+                "PostToolUse": [
+                    {
+                        "matcher": "Edit|Write",
+                        "hooks": [{"type": "command", "command": "someone-elses-tool"}],
+                    }
+                ],
+                "Stop": [
+                    {
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "echo graphctl-claude-stop is user-owned",
+                            }
+                        ]
+                    }
+                ],
+            }
+        }
+        (self.codex / "hooks.json").write_text(
+            json.dumps(original, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+
+        self._install()
+        installed = self._codex_hooks()
+        self.assertEqual(
+            original["hooks"]["PostToolUse"], installed["hooks"]["PostToolUse"]
+        )
+        self.assertIn(original["hooks"]["Stop"][0], installed["hooks"]["Stop"])
+
+        self._run("--uninstall")
+
+        self.assertEqual(original, self._codex_hooks())
+
+    def test_check_reports_drift_for_a_removed_event(self) -> None:
+        self._install()
+        document = self._codex_hooks()
+        document["hooks"].pop("SessionStart")
+        (self.codex / "hooks.json").write_text(
+            json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+
+        drifted = self._run("--check")
+
+        self.assertEqual(2, drifted.returncode)
+        self.assertIn("hook drift", drifted.stderr)
+        self.assertIn("hooks.json", drifted.stderr)
 
     def _skill(self, client: Path, skill_name: str) -> Path:
         return client / "skills" / skill_name / "SKILL.md"
@@ -392,7 +492,12 @@ class PcInstallContractTests(unittest.TestCase):
         spaced_home.mkdir()
         runtime_bin = spaced_home / "runtime with spaces"
         runtime_bin.mkdir()
-        for name in ("graphctl", "graphctl-claude-stop"):
+        for name in (
+            "graphctl",
+            "graphctl-claude-stop",
+            "graphctl-session-start",
+            "graphctl-session-end",
+        ):
             executable = runtime_bin / name
             executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             executable.chmod(executable.stat().st_mode | stat.S_IXUSR)

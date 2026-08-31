@@ -6,6 +6,13 @@ evaluation-output paths are confined to the current workspace. Symbolic links
 and link-like Windows reparse points, including directory junctions, are
 rejected; non-redirecting cloud placeholder tags remain usable.
 
+One kind of state is deliberately outside the workspace. Session observations
+are appended beneath the selected home, in the installer's own directory, under
+the same rules the installer follows: paths are confined to that directory,
+link-like components are rejected, and nothing else is written. They are kept
+there because a session that never creates a graph has no workspace to record
+into, which is exactly the case they exist to make visible.
+
 Executor and reviewer IDs enforce logical separation, not cryptographic
 identity. A user who can edit the graph can forge either ID or history. Use
 separate platform sessions/agents, read-only reviewer permissions, repository
@@ -26,8 +33,14 @@ than relying on agent configuration.
 
 Generated adapter trees reject symlinks and link-like Windows reparse points and
 must exactly match canonical skills. Claude hooks are opt-in because enabling a
-project hook executes local repository code. The example hook has no network
-calls or write operations.
+project hook executes local repository code. The example project hook makes no
+network calls and writes nothing.
+
+The installed session hooks do write: each appends one bounded record to the
+observation journal beneath the home. They write nothing else, make no network
+call, and read no file in the repository beyond what `git` reports about it.
+A failure to write degrades to writing nothing; it never changes a hook's exit
+code or a command's result.
 
 The PC installer only writes beneath the selected user home, rejects symlinked
 configuration parents, refuses unmanaged same-name targets before any client
@@ -40,11 +53,20 @@ an owned link only when it still resolves to the managed payload and removes a
 regular reviewer only when its hash still matches, so a user replacement is not
 silently deleted.
 
-The global Claude Stop hook runs the installed `graphctl-claude-stop` entry
-point from a dedicated Python environment. It does not import code from the
-repository being reviewed. It returns immediately when that repository has no
-`task-graph.json`; when a graph exists it applies the same bounded, offline
-completion check as the project adapter.
+The global session hooks run installed entry points from a dedicated Python
+environment. They do not import code from the repository being observed. The
+Stop hook records the working tree at the turn boundary and then, when the
+repository has a `task-graph.json`, applies the same bounded, offline
+completion check as the project adapter; when there is no graph it records the
+turn and returns success. Recording happens before the check and cannot change
+its verdict.
+
+The session-start hook additionally reports, on standard error, when the
+previous session in that repository changed code without recording any
+task-graph state. It never blocks a session, and it reports a given session at
+most once. Sizes come from `git`, and a recorded commit name is refused unless
+it is a forty-character hexadecimal sha, so a forged record cannot turn into a
+git argument.
 
 The harness does not auto-approve destructive commands, bypass sandboxes, or
 require external services. It does persist submitted and reviewer evidence in
@@ -61,6 +83,15 @@ The default `/task-graph.json` is ignored by Git. A graph saved under another
 name or directory is not automatically ignored; check `git status` before every
 commit and add the chosen graph path to `.gitignore` when it contains internal
 operational records.
+
+Session observations are not an audit trail and must never be described as
+one. They live in ordinary files that any process running as the user can
+append to, rewrite, or delete, exactly as the executor and reviewer identities
+can be forged. They record repository paths, timestamps, digests and change
+counts; they never record file contents, prompts, transcripts, or any part of
+a conversation. Retention is bounded to `MAX_JOURNAL_MONTHS` whole months and
+`graphctl conformance --prune` removes what is older. Apply the organization's
+retention and deletion policy to them as to graph files.
 
 Workspace confinement prevents accidental or prompt-driven writes outside the
 repository. It is not a defense against another process concurrently replacing

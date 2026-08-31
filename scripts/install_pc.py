@@ -31,6 +31,8 @@ SKILL_NAMES = (
 MANAGED_BEGIN = "<!-- BEGIN graph-engineering-agent-harness -->"
 MANAGED_END = "<!-- END graph-engineering-agent-harness -->"
 HOOK_MARKER = "graphctl-claude-stop"
+# The hook events this installer manages, in the order it writes them.
+MANAGED_HOOK_EVENTS = ("SessionStart", "Stop", "SessionEnd")
 INSTALL_DIRECTORY = Path(".local/share/graph-engineering-agent-harness")
 MANAGED_PATTERN = re.compile(
     rf"(?:\n)?{re.escape(MANAGED_BEGIN)}\n.*?{re.escape(MANAGED_END)}(?:\n)?",
@@ -81,47 +83,65 @@ def _without_managed_instructions(existing: str) -> str:
 
 
 def _load_settings(path: Path) -> dict[str, Any]:
+    """Parse one client's hook document, naming it if it cannot be merged.
+
+    Two clients are merged now, so an error that names only one sends the
+    reader to the wrong file.
+    """
+
     if not path.exists():
         return {}
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise InstallError(f"cannot safely merge Claude settings: {exc}") from exc
+        raise InstallError(f"cannot safely merge {path}: {exc}") from exc
     if not isinstance(value, dict):
-        raise InstallError("Claude settings must contain a JSON object")
+        raise InstallError(f"{path} must contain a JSON object")
     return cast("dict[str, Any]", value)
 
 
 def _without_managed_hooks(
     settings: dict[str, Any], managed_commands: set[str]
 ) -> dict[str, Any]:
+    """Remove only this harness's own hook entries, from every event it uses.
+
+    Everything else in the document is copied through untouched, including
+    other events, other entries under the same event, and matcher shapes this
+    installer does not produce. An event left with no entries is removed
+    rather than left as an empty list, so an install followed by an uninstall
+    returns the file to what it was.
+    """
+
     result = cast("dict[str, Any]", json.loads(json.dumps(settings)))
     hooks = result.get("hooks")
     if not isinstance(hooks, dict):
         return result
-    stop = hooks.get("Stop")
-    if not isinstance(stop, list):
-        return result
-    retained: list[Any] = []
-    for matcher in stop:
-        if not isinstance(matcher, dict):
-            retained.append(matcher)
+    for event in MANAGED_HOOK_EVENTS:
+        configured = hooks.get(event)
+        if not isinstance(configured, list):
             continue
-        entries = matcher.get("hooks")
-        if not isinstance(entries, list):
-            retained.append(matcher)
-            continue
-        filtered = [
-            entry for entry in entries if not _is_managed_hook(entry, managed_commands)
-        ]
-        if filtered:
-            copy = dict(matcher)
-            copy["hooks"] = filtered
-            retained.append(copy)
-    if retained:
-        hooks["Stop"] = retained
-    else:
-        hooks.pop("Stop", None)
+        retained: list[Any] = []
+        for matcher in configured:
+            if not isinstance(matcher, dict):
+                retained.append(matcher)
+                continue
+            entries = matcher.get("hooks")
+            if not isinstance(entries, list):
+                retained.append(matcher)
+                continue
+            filtered = [
+                entry
+                for entry in entries
+                if not _is_managed_hook(entry, managed_commands)
+            ]
+            if filtered:
+                copy = dict(matcher)
+                copy["hooks"] = filtered
+                retained.append(copy)
+        if retained:
+            hooks[event] = retained
+        else:
+            hooks.pop(event, None)
     if not hooks:
         result.pop("hooks", None)
     return result
@@ -139,28 +159,39 @@ def _is_managed_hook(entry: Any, managed_commands: set[str]) -> bool:
     return "args" not in entry or entry.get("args") == []
 
 
-def _with_managed_hook(
-    settings: dict[str, Any], command: str, previous_commands: set[str]
+def _with_managed_hooks(
+    settings: dict[str, Any],
+    commands: dict[str, Path],
+    previous_commands: set[str],
+    path: Path,
 ) -> dict[str, Any]:
-    result = _without_managed_hooks(settings, previous_commands | {command})
+    """Install one managed entry per event, replacing any earlier ones.
+
+    Removing before appending is what makes a repeated install idempotent and
+    what retires an entry left by a runtime that has since moved.
+    """
+
+    wanted = {str(path) for path in commands.values()}
+    result = _without_managed_hooks(settings, previous_commands | wanted)
     hooks = result.setdefault("hooks", {})
     if not isinstance(hooks, dict):
-        raise InstallError("Claude settings 'hooks' must be a JSON object")
-    stop = hooks.setdefault("Stop", [])
-    if not isinstance(stop, list):
-        raise InstallError("Claude settings 'hooks.Stop' must be a JSON array")
-    stop.append(
-        {
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": command,
-                    "args": [],
-                    "timeout": 10,
-                }
-            ]
-        }
-    )
+        raise InstallError(f"{path} 'hooks' must be a JSON object")
+    for event, command in commands.items():
+        configured = hooks.setdefault(event, [])
+        if not isinstance(configured, list):
+            raise InstallError(f"{path} 'hooks.{event}' must be a JSON array")
+        configured.append(
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": str(command),
+                        "args": [],
+                        "timeout": 10,
+                    }
+                ]
+            }
+        )
     return result
 
 
@@ -196,6 +227,23 @@ def _runtime_executables(bin_directory: Path) -> tuple[Path, Path]:
         bin_directory / f"graphctl{suffix}",
         bin_directory / f"graphctl-claude-stop{suffix}",
     )
+
+
+def _hook_commands(bin_directory: Path) -> dict[str, Path]:
+    """Map each managed hook event to the executable that serves it.
+
+    ``Stop`` fires once per assistant turn and ``SessionEnd`` once per
+    session, so the two are different events rather than two names for the
+    same one. Both clients deliver the same payload on standard input, which
+    is why one set of executables serves both.
+    """
+
+    suffix = ".exe" if os.name == "nt" else ""
+    return {
+        "SessionStart": bin_directory / f"graphctl-session-start{suffix}",
+        "Stop": bin_directory / f"graphctl-claude-stop{suffix}",
+        "SessionEnd": bin_directory / f"graphctl-session-end{suffix}",
+    }
 
 
 def _create_runtime(install_root: Path, python: Path) -> Path:
@@ -257,9 +305,10 @@ def _targets(
         payload / "agents/claude/graph-reviewer.md"
     )
     if runtime_bin is not None:
-        graphctl, guard = _runtime_executables(runtime_bin)
+        graphctl, _ = _runtime_executables(runtime_bin)
         targets[home / ".local/bin/graphctl"] = graphctl
-        targets[home / ".local/bin/graphctl-claude-stop"] = guard
+        for command in _hook_commands(runtime_bin).values():
+            targets[home / ".local/bin" / command.name] = command
     return targets
 
 
@@ -290,6 +339,7 @@ def _preflight_targets(targets: dict[Path, Path]) -> None:
 def _preflight_user_paths(home: Path, targets: dict[Path, Path]) -> None:
     for path in (
         home / ".codex/AGENTS.md",
+        home / ".codex/hooks.json",
         home / ".claude/CLAUDE.md",
         home / ".claude/settings.json",
     ):
@@ -370,11 +420,12 @@ def _backup(path: Path, home: Path, backup_root: Path) -> None:
 
 def _expected_state(
     home: Path, install_root: Path, runtime_bin: Path
-) -> tuple[dict[Path, Path], str, dict[str, Any]]:
-    graphctl, guard = _runtime_executables(runtime_bin)
+) -> tuple[dict[Path, Path], str, dict[str, Any], dict[str, Any]]:
+    graphctl, _ = _runtime_executables(runtime_bin)
+    commands = _hook_commands(runtime_bin)
     if not all(
         executable.is_file() and os.access(executable, os.X_OK)
-        for executable in (graphctl, guard)
+        for executable in (graphctl, *commands.values())
     ):
         raise InstallError(f"runtime executables are missing from {runtime_bin}")
     template = (ROOT / "adapters/global-instructions.md").read_text(encoding="utf-8")
@@ -383,18 +434,31 @@ def _expected_state(
     manifest = _load_manifest(install_root / "manifest.json")
     previous_runtime = manifest.get("runtime_bin")
     if isinstance(previous_runtime, str):
-        _, previous_guard = _runtime_executables(Path(previous_runtime))
-        previous_commands.add(str(previous_guard))
-    settings = _with_managed_hook(
-        _load_settings(home / ".claude/settings.json"), str(guard), previous_commands
+        previous_commands.update(
+            str(path) for path in _hook_commands(Path(previous_runtime)).values()
+        )
+    claude_path = home / ".claude/settings.json"
+    codex_path = home / ".codex/hooks.json"
+    settings = _with_managed_hooks(
+        _load_settings(claude_path), commands, previous_commands, claude_path
     )
-    return _targets(home, install_root / "payload", runtime_bin), block, settings
+    codex_hooks = _with_managed_hooks(
+        _load_settings(codex_path), commands, previous_commands, codex_path
+    )
+    return (
+        _targets(home, install_root / "payload", runtime_bin),
+        block,
+        settings,
+        codex_hooks,
+    )
 
 
 def install(home: Path, install_root: Path, runtime_bin: Path, dry_run: bool) -> None:
     manifest_path = install_root / "manifest.json"
     _load_manifest(manifest_path)
-    targets, block, settings = _expected_state(home, install_root, runtime_bin)
+    targets, block, settings, codex_hooks = _expected_state(
+        home, install_root, runtime_bin
+    )
     _preflight_user_paths(home, targets)
     _preflight_targets(targets)
     if dry_run:
@@ -408,6 +472,7 @@ def install(home: Path, install_root: Path, runtime_bin: Path, dry_run: bool) ->
             _atomic_write(destination, source_bytes)
     instruction_paths = (home / ".codex/AGENTS.md", home / ".claude/CLAUDE.md")
     settings_path = home / ".claude/settings.json"
+    codex_hooks_path = home / ".codex/hooks.json"
     instruction_updates: dict[Path, str] = {}
     for path in instruction_paths:
         existing = path.read_text(encoding="utf-8") if path.exists() else ""
@@ -418,9 +483,19 @@ def install(home: Path, install_root: Path, runtime_bin: Path, dry_run: bool) ->
     settings_changed = rendered_settings != (
         settings_path.read_bytes() if settings_path.exists() else b""
     )
+    # Codex documents the same events and the same payload, and its hook file
+    # is written even though the clients measured here parse it without
+    # running it: the entries cost nothing while that holds, and doctor
+    # reports from journal records whether they have ever fired.
+    rendered_codex = _json_bytes(codex_hooks)
+    codex_changed = rendered_codex != (
+        codex_hooks_path.read_bytes() if codex_hooks_path.exists() else b""
+    )
     changed_configs = [*instruction_updates]
     if settings_changed:
         changed_configs.append(settings_path)
+    if codex_changed:
+        changed_configs.append(codex_hooks_path)
     if changed_configs:
         backup_root = install_root / "backups" / str(time.time_ns())
         for path in changed_configs:
@@ -429,6 +504,8 @@ def install(home: Path, install_root: Path, runtime_bin: Path, dry_run: bool) ->
         _write_text(path, updated)
     if settings_changed:
         _atomic_write(settings_path, rendered_settings)
+    if codex_changed:
+        _atomic_write(codex_hooks_path, rendered_codex)
     for target, source in targets.items():
         _install_link(target, source)
     receipt = {
@@ -445,10 +522,23 @@ def install(home: Path, install_root: Path, runtime_bin: Path, dry_run: bool) ->
     print(f"installed Codex and Claude Code harness for {home}")
 
 
+def _managed_hook_files(
+    home: Path, settings: dict[str, Any], codex_hooks: dict[str, Any]
+) -> list[tuple[Path, dict[str, Any]]]:
+    """Pair each client's hook file with the content this installer expects."""
+
+    return [
+        (home / ".claude/settings.json", settings),
+        (home / ".codex/hooks.json", codex_hooks),
+    ]
+
+
 def check(home: Path, install_root: Path, runtime_bin: Path) -> None:
     if not _load_manifest(install_root / "manifest.json"):
         raise InstallError("install drift: manifest is missing")
-    targets, block, settings = _expected_state(home, install_root, runtime_bin)
+    targets, block, settings, codex_hooks = _expected_state(
+        home, install_root, runtime_bin
+    )
     problems: list[str] = []
     for relative, source in _asset_sources().items():
         installed = install_root / "payload" / relative
@@ -464,12 +554,9 @@ def check(home: Path, install_root: Path, runtime_bin: Path) -> None:
             or _managed_instructions(existing, block) != existing
         ):
             problems.append(f"instruction drift: {path}")
-    settings_path = home / ".claude/settings.json"
-    if (
-        not settings_path.exists()
-        or _json_bytes(settings) != settings_path.read_bytes()
-    ):
-        problems.append(f"hook drift: {settings_path}")
+    for hook_path, document in _managed_hook_files(home, settings, codex_hooks):
+        if not hook_path.exists() or _json_bytes(document) != hook_path.read_bytes():
+            problems.append(f"hook drift: {hook_path}")
     if problems:
         raise InstallError("install drift detected:\n- " + "\n- ".join(problems))
     print("installed harness is in sync")
@@ -505,17 +592,19 @@ def uninstall(home: Path, install_root: Path) -> None:
             instruction_update = _without_managed_instructions(existing)
             if instruction_update != existing:
                 _write_text(path, instruction_update)
-    settings_path = home / ".claude/settings.json"
-    _assert_safe_user_path(home, settings_path)
-    if settings_path.exists() and not settings_path.is_symlink():
-        settings = _load_settings(settings_path)
-        managed_commands: set[str] = set()
-        if runtime_bin is not None:
-            _, guard = _runtime_executables(runtime_bin)
-            managed_commands.add(str(guard))
-        settings_update = _without_managed_hooks(settings, managed_commands)
-        if settings_update != settings:
-            _atomic_write(settings_path, _json_bytes(settings_update))
+    managed_commands: set[str] = set()
+    if runtime_bin is not None:
+        managed_commands.update(
+            str(path) for path in _hook_commands(runtime_bin).values()
+        )
+    for configured in (home / ".claude/settings.json", home / ".codex/hooks.json"):
+        _assert_safe_user_path(home, configured)
+        if not configured.exists() or configured.is_symlink():
+            continue
+        existing_hooks = _load_settings(configured)
+        hooks_update = _without_managed_hooks(existing_hooks, managed_commands)
+        if hooks_update != existing_hooks:
+            _atomic_write(configured, _json_bytes(hooks_update))
     print(
         "removed managed Codex and Claude Code integrations; "
         "runtime retained for rollback"

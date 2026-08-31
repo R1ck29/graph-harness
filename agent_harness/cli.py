@@ -11,12 +11,27 @@ import tempfile
 from pathlib import Path
 from typing import Any, Sequence
 
+from . import conformance, journal
 from .errors import HarnessError
 from .graph import Graph
-from .paths import workspace_path
+from .paths import repository_key, user_data_path, workspace_path
 from .storage import MAX_GRAPH_BYTES, FileLock, GraphStore
 
 MAX_EVIDENCE_FILE_BYTES = 1_048_576
+
+# Mirrors the floor the installed hook enforces before it imports anything,
+# so doctor names the same boundary the hook fails on.
+MINIMUM_PYTHON = (3, 10)
+
+# The commands that move graph state. A session that edits code and runs none
+# of these is the case the journal exists to make visible.
+MUTATING_COMMANDS = frozenset(
+    {"init", "add-node", "start", "submit", "verify", "withdraw", "retry"}
+)
+
+# The events only a client hook can produce. Hook liveness is judged from
+# these alone.
+SESSION_EVENTS = frozenset({"session_open", "turn_end", "session_close"})
 
 
 def _read_evidence_file(path: Path) -> str:
@@ -136,6 +151,84 @@ def _lock_diagnostics(path: Path) -> dict[str, Any]:
     return report
 
 
+def _runtime_diagnostics() -> dict[str, Any]:
+    """Report the interpreter that will actually run the installed hooks.
+
+    A hook configured against a system interpreter older than the supported
+    floor fails closed on every session, which looks like a broken harness
+    rather than a misconfigured one. The version is read from the runtime's
+    own ``pyvenv.cfg`` rather than by launching it, so the diagnosis has no
+    side effects.
+    """
+
+    report: dict[str, Any] = {
+        "runtime_path": None,
+        "runtime_version": None,
+        "runtime_supported": None,
+    }
+    try:
+        config = user_data_path("venv/pyvenv.cfg")
+    except HarnessError:
+        return report
+    report["runtime_path"] = str(config.parent)
+    try:
+        lines = config.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return report
+    for line in lines:
+        name, separator, value = line.partition("=")
+        if separator and name.strip() == "version":
+            version = value.strip()
+            report["runtime_version"] = version
+            digits = version.split(".")
+            try:
+                report["runtime_supported"] = (
+                    int(digits[0]),
+                    int(digits[1]),
+                ) >= MINIMUM_PYTHON
+            except (IndexError, ValueError):
+                report["runtime_supported"] = None
+            break
+    return report
+
+
+def _journal_diagnostics() -> dict[str, Any]:
+    """Report what the journal has actually observed, per client.
+
+    Liveness is read from recorded sessions rather than simulated. A client
+    whose hooks are configured but never fire leaves no records, which is the
+    only honest way to tell a working installation from a decorative one.
+    """
+
+    report: dict[str, Any] = {
+        "journal_path": None,
+        "journal_bytes": journal.total_bytes(),
+        "journal_months": [path.name for path in journal.month_files()],
+        "last_observed": {},
+        "warnings": [],
+    }
+    try:
+        report["journal_path"] = str(journal.journal_directory())
+    except HarnessError as exc:
+        report["warnings"].append(f"The journal directory is unusable: {exc}")
+        return report
+    latest: dict[str, str] = {}
+    for entry in journal.read():
+        # Only a session boundary proves a hook ran. A graph_transition proves
+        # that graphctl ran, which a person can do by hand with no hook
+        # installed at all, so counting it would report a client as observed
+        # on exactly the evidence that says nothing about its hooks.
+        if entry.get("event") not in SESSION_EVENTS:
+            continue
+        client = entry.get("client")
+        stamp = entry.get("ts")
+        if isinstance(client, str) and isinstance(stamp, str):
+            if stamp > latest.get(client, ""):
+                latest[client] = stamp
+    report["last_observed"] = latest
+    return report
+
+
 def _save_new_graph(store: GraphStore, graph: Graph) -> None:
     """Publish a complete graph atomically without replacing an existing path."""
 
@@ -238,6 +331,35 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument("path", nargs="?")
     ready = commands.add_parser("ready", help="list tasks ready to start")
     ready.add_argument("path", nargs="?")
+    conformance = commands.add_parser(
+        "conformance", help="report whether sessions followed the protocol"
+    )
+    conformance.add_argument("--repo", help="limit the report to one repository")
+    conformance.add_argument(
+        "--min-files",
+        type=int,
+        default=0,
+        dest="min_files",
+        help="omit sessions that changed fewer files than this",
+    )
+    conformance.add_argument(
+        "--no-codex",
+        action="store_true",
+        dest="no_codex",
+        help="omit sessions recovered from the Codex session store",
+    )
+    conformance.add_argument(
+        "--prune",
+        action="store_true",
+        help="delete journal months beyond the retention bound",
+    )
+    conformance.add_argument(
+        "--keep-months",
+        type=int,
+        default=journal.MAX_JOURNAL_MONTHS,
+        dest="keep_months",
+        help="months of history to retain when pruning",
+    )
     commands.add_parser("status", help="summarize progress")
     commands.add_parser("completion-check", help="check whether every task is verified")
 
@@ -386,6 +508,29 @@ def run(args: argparse.Namespace) -> Any:
         else:
             report["graph_valid"] = True
             report["node_count"] = len(graph.nodes)
+        journal_report = _journal_diagnostics()
+        warnings = journal_report.pop("warnings")
+        report.update(journal_report)
+        report.update(_runtime_diagnostics())
+        if report["runtime_supported"] is False:
+            warnings.append(
+                f"The installed runtime reports Python {report['runtime_version']}, "
+                f"below the supported {MINIMUM_PYTHON[0]}.{MINIMUM_PYTHON[1]}. Hooks "
+                "using it fail closed on every session; reinstall against a "
+                "supported interpreter."
+            )
+        for client in ("claude", "codex"):
+            if client not in report["last_observed"]:
+                warnings.append(
+                    f"No {client} session has been observed. Its hooks may not be "
+                    "installed, or the client may not run them. Run "
+                    "'python scripts/install_pc.py --check' to compare the "
+                    "installed configuration with what this harness expects."
+                )
+        report["warnings"].extend(warnings)
+        # Journal and runtime findings are advisory. They describe how much of
+        # the harness is observable, not whether this graph can be worked on,
+        # so they must not change the health of the graph itself.
         report["healthy"] = report["graph_valid"] and not lock_present
         return report
     if args.command == "validate":
@@ -393,6 +538,14 @@ def run(args: argparse.Namespace) -> Any:
         return {"valid": True, "nodes": len(graph.nodes)}
     if args.command == "ready":
         return {"ready": store.load().ready_node_ids()}
+    if args.command == "conformance":
+        if args.prune:
+            return {"pruned": journal.prune(args.keep_months)}
+        return conformance.report(
+            repo=args.repo,
+            min_files=args.min_files,
+            include_codex=not args.no_codex,
+        )
     if args.command == "status":
         return store.load().status_summary()
     if args.command == "completion-check":
@@ -476,10 +629,54 @@ def run(args: argparse.Namespace) -> Any:
     raise HarnessError(f"unsupported command: {args.command}")
 
 
+def _observe(args: argparse.Namespace, result: Any) -> None:
+    """Record one state change so a session that skipped the graph stands out.
+
+    Journaling happens here, at the single point where a command has already
+    succeeded, rather than inside each handler. A command that raised never
+    reaches this line, so "a failed command records nothing" holds by
+    construction instead of by seven separate call sites agreeing.
+    """
+
+    if args.command not in MUTATING_COMMANDS or not isinstance(result, dict):
+        return
+    try:
+        # Claude Code exports the session id into tool subprocesses, so a
+        # transition can name the session that ran it directly. Codex does
+        # not, and those records are matched by repository and time instead.
+        session = os.environ.get("CLAUDE_CODE_SESSION_ID")
+        journal.append(
+            journal.record(
+                "graph_transition",
+                client="claude" if session else None,
+                session_id=session,
+                repo=repository_key(),
+                command=args.command,
+                node=result.get("node"),
+                # A verify reports its verdict as "result" rather than a
+                # status, and folding a session's history needs to tell a PASS
+                # from a FAIL.
+                status=result.get("status") or result.get("result"),
+                actor=getattr(args, "actor_id", None)
+                or getattr(args, "executor_id", None)
+                or getattr(args, "reviewer_id", None),
+            )
+        )
+    except Exception:  # noqa: BLE001 - the command already succeeded
+        # The command's work is committed by the time this runs. Anything
+        # raised here would reach main's handler and report exit 2 for a
+        # change that actually happened, which is a worse outcome than losing
+        # one observation. Path.cwd() alone can raise when the working
+        # directory has been removed underneath the process.
+        return
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     try:
-        result = run(parser.parse_args(argv))
+        arguments = parser.parse_args(argv)
+        result = run(arguments)
+        _observe(arguments, result)
         _print(result)
         return 0
     except (HarnessError, OSError, json.JSONDecodeError) as exc:
