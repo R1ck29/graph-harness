@@ -12,7 +12,7 @@ from typing import Any
 from unittest import mock
 
 from agent_harness import claude_hook, journal, session_hooks, worktree
-from agent_harness.paths import repository_key
+from agent_harness.paths import repository_key, repository_key_fast
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 
@@ -931,6 +931,179 @@ class SessionHookTests(unittest.TestCase):
         self.assertIsNone(
             session_hooks.previous_bypass(repository_key(self.repo), since=asking)
         )
+
+    def _journal_text(self) -> str:
+        return "".join(
+            path.read_text(encoding="utf-8") for path in journal.month_files(self.home)
+        )
+
+    def _edits(self) -> list[dict[str, Any]]:
+        return [
+            entry for entry in journal.read(self.home) if entry.get("event") == "edit"
+        ]
+
+    def _edit_payload(self, session_id: str, tool: str, path: str) -> str:
+        payload = json.loads(self._payload(session_id=session_id))
+        payload["tool_name"] = tool
+        payload["tool_input"] = {"file_path": path}
+        return json.dumps(payload)
+
+    def test_an_edit_records_a_hashed_path_and_never_the_path(self) -> None:
+        # A path is content enough: a filename can name a customer, and
+        # docs/security.md forbids recording user content.
+        target = str(self.repo / "clients" / "acme-contract.md")
+
+        with mock.patch(
+            "sys.stdin", io.StringIO(self._edit_payload("E1", "Edit", target))
+        ):
+            self.assertEqual(0, session_hooks.record_edit())
+
+        recorded = self._edits()
+        self.assertEqual(1, len(recorded))
+        self.assertEqual("Edit", recorded[0]["tool"])
+        self.assertEqual("E1", recorded[0]["session_id"])
+        self.assertEqual(repository_key(self.repo), recorded[0]["repo"])
+        self.assertRegex(recorded[0]["path_id"], r"^[0-9a-f]{12}$")
+        text = self._journal_text()
+        self.assertNotIn("acme-contract", text)
+        self.assertNotIn("clients", text)
+
+    def test_the_same_path_hashes_the_same_and_a_different_one_does_not(self) -> None:
+        first = session_hooks.path_id(self.repo, str(self.repo / "a.py"))
+        again = session_hooks.path_id(self.repo, str(self.repo / "a.py"))
+        other = session_hooks.path_id(self.repo, str(self.repo / "b.py"))
+
+        self.assertEqual(first, again)
+        self.assertNotEqual(first, other)
+        self.assertRegex(first, r"^[0-9a-f]{12}$")
+
+    def test_a_path_outside_the_repository_is_recorded_without_the_path(self) -> None:
+        with mock.patch(
+            "sys.stdin", io.StringIO(self._edit_payload("E2", "Write", "/etc/hosts"))
+        ):
+            self.assertEqual(0, session_hooks.record_edit())
+
+        recorded = self._edits()
+        self.assertEqual(1, len(recorded))
+        self.assertRegex(recorded[0]["path_id"], r"^[0-9a-f]{12}$")
+        self.assertNotIn("/etc/hosts", self._journal_text())
+
+    def test_every_managed_editing_tool_is_recorded(self) -> None:
+        for index, tool in enumerate(("Edit", "Write", "MultiEdit", "NotebookEdit")):
+            payload = self._edit_payload(f"E{index}", tool, str(self.repo / "a.py"))
+            with mock.patch("sys.stdin", io.StringIO(payload)):
+                self.assertEqual(0, session_hooks.record_edit())
+
+        self.assertEqual(
+            ["Edit", "Write", "MultiEdit", "NotebookEdit"],
+            [entry["tool"] for entry in self._edits()],
+        )
+
+    def test_an_edit_that_cannot_be_recorded_still_exits_zero(self) -> None:
+        payload = self._edit_payload("E3", "Edit", str(self.repo / "a.py"))
+
+        with mock.patch("sys.stdin", io.StringIO(payload)):
+            with mock.patch.object(journal, "append", return_value=False):
+                self.assertEqual(0, session_hooks.record_edit())
+
+        with mock.patch("sys.stdin", io.StringIO(payload)):
+            with mock.patch.object(journal, "append", side_effect=OSError("full")):
+                self.assertEqual(0, session_hooks.record_edit())
+
+    def test_an_unusable_edit_payload_records_nothing_and_exits_zero(self) -> None:
+        # A tool call is not a boundary; nothing is worth recording when the
+        # payload does not name a tool and a file.
+        unusable = [
+            "",
+            "not json",
+            "[]",
+            "{}",
+            json.dumps({"session_id": "x", "tool_name": "Edit"}),
+            json.dumps(
+                {"session_id": "x", "tool_name": "", "tool_input": {"file_path": "a"}}
+            ),
+            json.dumps({"session_id": "x", "tool_name": "Edit", "tool_input": "a"}),
+            json.dumps(
+                {
+                    "session_id": "x",
+                    "tool_name": "Edit",
+                    "tool_input": {"file_path": ""},
+                }
+            ),
+        ]
+
+        for raw in unusable:
+            with mock.patch("sys.stdin", io.StringIO(raw)):
+                self.assertEqual(0, session_hooks.record_edit(), raw)
+
+        self.assertEqual([], self._edits())
+
+    def test_an_oversized_edit_payload_is_refused(self) -> None:
+        payload = self._edit_payload(
+            "E4", "Edit", str(self.repo / ("a" * session_hooks.MAX_HOOK_INPUT_BYTES))
+        )
+
+        with mock.patch("sys.stdin", io.StringIO(payload)):
+            self.assertEqual(0, session_hooks.record_edit())
+
+        self.assertEqual([], self._edits())
+
+    def test_the_edit_hook_takes_no_snapshot_and_spawns_no_process(self) -> None:
+        # It runs after every editing tool call rather than once per turn, so
+        # anything paid here is paid hundreds of times in a session. A
+        # snapshot costs about 130 ms and several git calls; a bare
+        # `git rev-parse` for the repository key still costs a process.
+        payload = self._edit_payload("E5", "Edit", str(self.repo / "a.py"))
+        runs: list[tuple[str, ...]] = []
+        real_run = subprocess.run
+
+        def counted(arguments: Any, **options: Any) -> Any:
+            runs.append(tuple(arguments))
+            return real_run(arguments, **options)
+
+        with mock.patch("sys.stdin", io.StringIO(payload)):
+            with mock.patch.object(
+                worktree, "snapshot", side_effect=AssertionError("snapshotted")
+            ):
+                with mock.patch("subprocess.run", counted):
+                    self.assertEqual(0, session_hooks.record_edit())
+
+        self.assertEqual(1, len(self._edits()))
+        self.assertEqual([], runs)
+
+    def test_the_fast_key_agrees_with_the_one_every_other_producer_uses(self) -> None:
+        # A cheaper derivation is only safe while it names the same
+        # repository; a producer that drifted would look like a session of
+        # its own.
+        inner = self.repo / "pkg" / "deep"
+        inner.mkdir(parents=True)
+
+        # Directories only: every producer names a directory. Handed a file,
+        # `git -C` fails and repository_key degrades to the path it was given,
+        # while the walk-up still finds the top level. Nothing passes a file,
+        # so the two are not contracted to agree there.
+        for start in (self.repo, inner):
+            self.assertEqual(
+                repository_key(start), repository_key_fast(start), str(start)
+            )
+
+    def test_the_fast_key_falls_back_when_there_is_no_git_directory(self) -> None:
+        outside = Path(self._directory.name) / "plain"
+        outside.mkdir()
+
+        self.assertEqual(repository_key(outside), repository_key_fast(outside))
+
+    def test_the_edit_entry_point_fails_closed_on_an_unsupported_interpreter(
+        self,
+    ) -> None:
+        payload = self._edit_payload("E6", "Edit", str(self.repo / "a.py"))
+
+        with mock.patch("sys.stdin", io.StringIO(payload)):
+            with mock.patch("sys.version_info", (3, 8, 5)):
+                with self.assertRaises(SystemExit) as refused:
+                    session_hooks.edit_entrypoint()
+
+        self.assertEqual(2, refused.exception.code)
 
     def test_an_unsupported_interpreter_still_fails_closed(self) -> None:
         with self.assertRaises(SystemExit) as refused:

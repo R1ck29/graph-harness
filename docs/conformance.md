@@ -21,6 +21,12 @@ successful state change.
 | `session_close` | `SessionEnd` | as above, plus the client's stated reason |
 | `graph_transition` | `graphctl`, after a handler succeeds | command, node, resulting status, actor |
 | `bypass_reported` | `SessionStart`, when it reports | the session it named |
+| `edit` | `PostToolUse`, on an editing tool | client, session, repository, tool name, hashed path |
+
+An `edit` record carries `path_id`, the first twelve hexadecimal characters of
+the SHA-256 of the path relative to the repository. **The path itself is never
+recorded.** A path is content enough — a filename can name a customer — and the
+hash still counts how many distinct files a session touched.
 
 No file contents, prompt, or transcript is recorded. A record is capped at
 `MAX_JOURNAL_LINE_BYTES`; an over-long one sheds its variable fields rather

@@ -23,7 +23,10 @@ from .errors import HarnessError
 from .graph import utc_now
 from .paths import is_link_like, user_data_path
 
-SCHEMA_VERSION = 1
+# Version 2 adds the ``edit`` event. Readers accept both: a version 1 record
+# carries no edit events, which reads correctly as a session observed through
+# the working tree alone.
+SCHEMA_VERSION = 2
 JOURNAL_DIRECTORY = "journal"
 # Spelled with an explicit digit range because ``\d`` also matches non-ASCII
 # digits, which would let a file no writer of ours creates name a month.
@@ -49,6 +52,9 @@ EVENTS = (
     # second-precision clock, on a damaged record, and on an unrelated
     # concurrent session.
     "bypass_reported",
+    # Direct evidence that this session's agent wrote a file. A working-tree
+    # comparison says something changed; only this says who changed it.
+    "edit",
 )
 
 # Dropped in this order to bring an over-long record under the line bound,

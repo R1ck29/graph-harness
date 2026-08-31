@@ -114,6 +114,34 @@ def repository_key(value: str | os.PathLike[str] | None = None) -> str:
         return str(start)
 
 
+def repository_key_fast(value: str | os.PathLike[str] | None = None) -> str:
+    """Return the same key as ``repository_key`` without spawning git.
+
+    The edit hook runs after every editing tool call rather than once per
+    turn, so a subprocess there is paid hundreds of times in a session. The
+    top level is found by walking up for ``.git`` instead, which is the same
+    directory git names: a worktree and a submodule mark theirs with a
+    ``.git`` file rather than a directory, and both are found by testing for
+    existence rather than for a directory.
+
+    Falling back to the git call keeps the two in agreement when there is no
+    ``.git`` to find, so no producer can drift from the others by using this.
+    """
+
+    try:
+        start = Path(value) if value is not None else Path.cwd()
+        resolved = start.resolve()
+    except (OSError, ValueError):
+        return repository_key(value)
+    for candidate in (resolved, *resolved.parents):
+        try:
+            if (candidate / ".git").exists():
+                return str(candidate)
+        except OSError:
+            break
+    return repository_key(value)
+
+
 def selected_home() -> Path:
     """Return the home directory that owns installed harness state.
 

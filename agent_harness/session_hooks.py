@@ -14,6 +14,7 @@ standard error and be seen without blocking the session.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -22,7 +23,7 @@ from typing import Any
 
 from . import journal, worktree
 from .errors import HarnessError
-from .paths import repository_key
+from .paths import repository_key, repository_key_fast
 
 MAX_HOOK_INPUT_BYTES = 1_048_576
 
@@ -42,6 +43,17 @@ MAX_CANDIDATES = 5
 # A stale lock from a killed hook should cost a moment, not the full wait a
 # graph write is given: losing this race only means saying nothing.
 REPORT_LOCK_TIMEOUT_SECONDS = 1.0
+
+# Only the hash of an edited path is recorded, never the path. A path is
+# content enough: `clients/acme/contract.md` names a customer in its filename,
+# and docs/security.md forbids recording user content. Twelve hex characters
+# distinguish the files one session touched without carrying back anything
+# that could identify them.
+PATH_ID_CHARACTERS = 12
+
+# The editing tools this harness treats as evidence. Kept here so the
+# installer writes one matcher and the reader tests one list.
+EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 
 
 def read_payload(stream: Any) -> dict[str, Any] | None:
@@ -70,22 +82,86 @@ def client_name() -> str:
     return "unknown"
 
 
-def repository(payload: dict[str, Any]) -> Path:
+def repository(payload: dict[str, Any], fast: bool = False) -> Path:
     """Return the directory a session's work belongs to.
 
     ``CLAUDE_PROJECT_DIR`` is preferred over the payload's ``cwd`` because the
     payload reports where the process happens to be at hook time, which moves
     when the session changes directory, while the observation needs one stable
     identity for the whole session.
+
+    *fast* selects the key derivation that does not spawn git. It is for the
+    edit hook, which runs after every editing tool call; the boundary hooks
+    run once each and take the git call.
     """
 
+    derive = repository_key_fast if fast else repository_key
     for candidate in (
         os.environ.get("CLAUDE_PROJECT_DIR"),
         payload.get("cwd"),
     ):
         if isinstance(candidate, str) and candidate:
-            return Path(repository_key(candidate))
-    return Path(repository_key())
+            return Path(derive(candidate))
+    return Path(derive())
+
+
+def path_id(repo: str | os.PathLike[str], path: str) -> str:
+    """Return a stable, non-reversible identifier for one edited path.
+
+    Relative to the repository so the same file yields one value however the
+    client named it, and hashed so the journal can count distinct files
+    without holding anything that says which files they were.
+    """
+
+    try:
+        relative = str(Path(path).resolve().relative_to(Path(repo).resolve()))
+    except (OSError, ValueError):
+        # A path outside the repository is still one distinct file. It is
+        # hashed whole rather than dropped, because a session that edits
+        # outside the project has still edited something.
+        relative = str(path)
+    return hashlib.sha256(relative.encode("utf-8", "replace")).hexdigest()[
+        :PATH_ID_CHARACTERS
+    ]
+
+
+def record_edit() -> int:
+    """Record that an editing tool ran, and always return 0.
+
+    This is the cheapest producer here, because it runs after every edit
+    rather than once per turn: read stdin, derive the repository key, hash one
+    string, append one line. It takes no snapshot, which would cost about
+    130 ms and several git calls each time.
+
+    It reports success unconditionally. A `PostToolUse` hook that failed would
+    surface as a broken tool call, and the record is lost either way.
+    """
+
+    payload = read_payload(sys.stdin)
+    if payload is None:
+        return 0
+    tool = payload.get("tool_name")
+    if not isinstance(tool, str) or not tool:
+        return 0
+    target = payload.get("tool_input")
+    named = target.get("file_path") if isinstance(target, dict) else None
+    if not isinstance(named, str) or not named:
+        return 0
+    try:
+        root = repository(payload, fast=True)
+        journal.append(
+            journal.record(
+                "edit",
+                client=client_name(),
+                session_id=payload.get("session_id"),
+                repo=str(root),
+                tool=tool,
+                path_id=path_id(root, named),
+            )
+        )
+    except Exception:  # noqa: BLE001 - a lost record must not break an edit
+        return 0
+    return 0
 
 
 def observe(event: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -377,3 +453,12 @@ def end_entrypoint() -> int:
 
     ensure_supported_python(sys.version_info[:3])
     return session_end()
+
+
+def edit_entrypoint() -> int:
+    """Console entry point for the post-edit hook."""
+
+    from .claude_hook import ensure_supported_python
+
+    ensure_supported_python(sys.version_info[:3])
+    return record_edit()
