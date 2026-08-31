@@ -121,12 +121,32 @@ Turn-boundary snapshots already exist; the `Stop` hook takes one every turn.
 **`HEAD` is never evidence of work.** It stays in the snapshot as context and is
 reported, but no verdict depends on it.
 
-That one sentence removes the entire round-3 defect class. A pull, a checkout, a
-rebase, a reset, a colleague's commit in another terminal and a submodule update
-all move `HEAD` without dirtying the tree and without producing an edit event,
-so all of them are silent. No ancestry check, no committer matching, no time
-window, no `HEAD` validation is needed, because no recorded `HEAD` is ever
-passed to git again.
+That one sentence removes the round-3 defect at its source. No ancestry check,
+no committer matching, no time window and no `HEAD` validation is needed,
+because no recorded `HEAD` is ever passed to git again.
+
+**It is not sufficient on its own, and the first draft of this section said it
+was.** That draft claimed a pull, a checkout, a rebase, a reset, a colleague's
+commit and a submodule update all leave the tree undirtied and are therefore
+silent. A review disproved it: a conflicted pull, rebase, cherry-pick or revert
+fills the tree with content nobody authored; a submodule update dirties the
+gitlink; `git stash pop` materialises real content; and discarding pre-existing
+dirt with `git checkout -- .`, `git clean` or a hard reset moves the digest
+while adding nothing. Three further rules are therefore required:
+
+- A snapshot taken while git has a merge, rebase, cherry-pick, revert or bisect
+  open is **not judgeable**, exactly as a degraded one is not. Aborting the
+  operation afterwards does not repair the record, because the size charged is
+  a maximum across boundaries, so one boundary taken mid-conflict would accuse
+  a session whose net effect was nothing.
+- Submodule differences are excluded at the source, with
+  `--ignore-submodules=all` on the status and diff calls.
+- A digest difference alone is not work. The session must also have **added**
+  something: an edit record, or a boundary showing more changed files or lines
+  than its first boundary did. Throwing dirt away is not authoring.
+
+`git stash pop` remains indistinguishable from authoring and is documented as
+the one known false positive rather than papered over.
 
 ### Sizing
 

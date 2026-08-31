@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 from typing import Any, Iterable
 
-from . import codex_sessions, journal, worktree
+from . import codex_sessions, journal, session_hooks
 
 SCHEMA_VERSION = 1
 
@@ -65,6 +65,7 @@ def _windows(records: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
             "session_open",
             "turn_end",
             "session_close",
+            "edit",
         }:
             continue
         state = sessions.setdefault(
@@ -78,8 +79,12 @@ def _windows(records: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
                 "started_at": None,
                 "ended_at": None,
                 "closed": False,
+                "records": [],
             },
         )
+        state["records"].append(entry)
+        if event == "edit":
+            continue
         if event == "session_open":
             if state["opened"] is None:
                 state["opened"] = entry
@@ -130,25 +135,20 @@ def _judge(state: dict[str, Any]) -> dict[str, Any]:
     if ended is None:
         verdict["verdict"] = "incomplete"
         return verdict
-    before, after = opened.get("snapshot"), ended.get("snapshot")
-    sound = (
-        isinstance(before, dict)
-        and isinstance(after, dict)
-        and not before.get("degraded")
-        and not after.get("degraded")
-        and bool(before.get("git"))
-        and bool(after.get("git"))
-    )
-    if not sound:
+    if not session_hooks.judgeable(
+        opened, ended
+    ) or not session_hooks.observation_sound(state["records"]):
         # The observation failed rather than the session. Reporting it as
         # unchanged would be a claim the evidence does not support.
         verdict["verdict"] = "unobserved"
         return verdict
-    files, lines = worktree.change_size(before, after)
+    # The same two rules the hook uses, called from the same place, so a
+    # report and a warning cannot disagree about one session.
+    files, lines = session_hooks.session_size(state["records"])
     verdict["changed_files"] = files
     verdict["changed_lines"] = lines
     verdict["confidence"] = HIGH if state["closed"] else MEDIUM
-    if not worktree.changed(before, after):
+    if not session_hooks.edited(state["records"]):
         verdict["verdict"] = "read_only"
         return verdict
     verdict["verdict"] = "conformant" if state["transitions"] else "bypass"

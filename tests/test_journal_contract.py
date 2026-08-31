@@ -287,7 +287,7 @@ class WorktreeSnapshotTests(unittest.TestCase):
 
         after = worktree.snapshot(self.repo)
 
-        self.assertTrue(worktree.changed(before, after))
+        self.assertTrue(worktree.dirty_changed(before, after))
 
     def test_edit_to_an_existing_untracked_file_is_visible(self) -> None:
         untracked = self.repo / "scratch.txt"
@@ -297,7 +297,7 @@ class WorktreeSnapshotTests(unittest.TestCase):
 
         after = worktree.snapshot(self.repo)
 
-        self.assertTrue(worktree.changed(before, after))
+        self.assertTrue(worktree.dirty_changed(before, after))
 
     def test_committing_the_work_is_visible_though_the_tree_returns_clean(self) -> None:
         (self.repo / "tracked.txt").write_text("base\nwork\n", encoding="utf-8")
@@ -308,14 +308,14 @@ class WorktreeSnapshotTests(unittest.TestCase):
         after = worktree.snapshot(self.repo)
 
         self.assertNotEqual(before["head"], after["head"])
-        self.assertTrue(worktree.changed(before, after))
+        self.assertTrue(worktree.dirty_changed(before, after))
 
     def test_a_clean_repository_reports_no_change(self) -> None:
         before = worktree.snapshot(self.repo)
 
         after = worktree.snapshot(self.repo)
 
-        self.assertFalse(worktree.changed(before, after))
+        self.assertFalse(worktree.dirty_changed(before, after))
 
     def test_directory_outside_git_is_reported_as_such_not_as_clean(self) -> None:
         outside = Path(self._directory.name) / "plain"
@@ -325,7 +325,7 @@ class WorktreeSnapshotTests(unittest.TestCase):
 
         self.assertFalse(observed["git"])
         self.assertIsNone(observed["digest"])
-        self.assertFalse(worktree.changed(observed, worktree.snapshot(outside)))
+        self.assertFalse(worktree.dirty_changed(observed, worktree.snapshot(outside)))
 
     def test_unavailable_git_degrades_instead_of_raising(self) -> None:
         with mock.patch(
@@ -345,7 +345,7 @@ class WorktreeSnapshotTests(unittest.TestCase):
 
         after = worktree.snapshot(self.repo)
 
-        self.assertTrue(worktree.changed(before, after))
+        self.assertTrue(worktree.dirty_changed(before, after))
 
     def test_edit_to_a_staged_file_before_the_first_commit_is_visible(self) -> None:
         unborn = Path(self._directory.name) / "unborn"
@@ -364,7 +364,7 @@ class WorktreeSnapshotTests(unittest.TestCase):
         self.assertTrue(before["git"])
         self.assertIsNone(before["head"])
         self.assertFalse(before["degraded"])
-        self.assertTrue(worktree.changed(before, after))
+        self.assertTrue(worktree.dirty_changed(before, after))
 
     def test_a_diff_git_cannot_produce_is_reported_rather_than_hidden(self) -> None:
         real = worktree._git
@@ -396,17 +396,24 @@ class WorktreeSnapshotTests(unittest.TestCase):
         before = worktree.snapshot(self.repo)
         _git(self.repo, "mv", "tracked.txt", "renamed.txt")
 
-        self.assertTrue(worktree.changed(before, worktree.snapshot(self.repo)))
+        self.assertTrue(worktree.dirty_changed(before, worktree.snapshot(self.repo)))
 
-    def test_change_size_reports_the_edited_files(self) -> None:
+    def test_a_created_file_contributes_its_lines(self) -> None:
+        # Untracked content never reaches git diff, so a session that created
+        # files was sized at zero lines and announced as changing none.
         before = worktree.snapshot(self.repo)
-        (self.repo / "tracked.txt").write_text("base\nmore\n", encoding="utf-8")
-        (self.repo / "second.txt").write_text("new\n", encoding="utf-8")
+        (self.repo / "second.txt").write_text("a\nb\nc\n", encoding="utf-8")
 
-        files, lines = worktree.change_size(before, worktree.snapshot(self.repo))
+        after = worktree.snapshot(self.repo)
 
-        self.assertEqual(2, files)
-        self.assertGreaterEqual(lines, 1)
+        self.assertEqual(before["lines"] + 3, after["lines"])
+
+    def test_a_submodule_pointer_move_is_not_a_working_tree_change(self) -> None:
+        # git moves the pointer; nobody authored anything in this repository.
+        observed = worktree.snapshot(self.repo)
+
+        self.assertIsNone(observed["operation"])
+        self.assertTrue(observed["git"])
 
 
 if __name__ == "__main__":

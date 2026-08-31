@@ -7,9 +7,9 @@ Design: `docs/superpowers/specs/2026-08-31-conformance-redesign-design.md`.
 Step plan: `docs/superpowers/plans/2026-08-31-conformance-redesign.md`.
 Executable plan: `task-graph.json` (7 nodes), which is the authority for status.
 
-- [ ] `edit-events` — record an editing tool call, never a path or its contents.
+- [x] `edit-events` — record an editing tool call, never a path or its contents.
 - [ ] `bypass-signal` — judge on edit events and dirty-tree differences; a head
-      move becomes context, never evidence.
+      move becomes context, never evidence. **Budget exhausted at 2 of 2.**
 - [ ] `installer-hook` — manage the edit hook on both clients.
 - [ ] `escape-hatches` — `grant-attempt` and `supersede`, so a person's decision
       is recorded rather than hand-edited.
@@ -17,6 +17,52 @@ Executable plan: `task-graph.json` (7 nodes), which is the authority for status.
       and how often the protocol was followed.
 - [ ] `docs` — describe the signal the code actually uses, blind spot included.
 - [ ] `gate` — the full local verification gate.
+
+## Where `bypass-signal` stands
+
+Two attempts, two independent FAILs, budget exhausted. The same escalation as
+before applies: whether to grant a third is the user's decision, not this
+session's.
+
+**Attempt 1** removed the `HEAD` term, and the dirty-tree term inherited the
+same defect. A conflicted `git pull` was reported; so was the same session after
+`git merge --abort`, with a byte-identical tree and an unmoved `HEAD`, because
+the size charged is a maximum across boundaries. `git stash pop` and
+`git submodule update --remote` were reported. `git checkout -- .`,
+`git clean -fd` and a hard reset over pre-existing dirt were silent at the hook
+but classified `bypass` by the report.
+
+**Attempt 2** added three rules and both of them broke something new:
+
+1. *Not judgeable while a git operation is open*, detected from marker files.
+   `REBASE_HEAD` is not removed when a rebase finishes. Confirmed here directly:
+   on `git 2.50.1` (`/usr/bin/git`, Apple's stock git) a completed rebase leaves
+   `REBASE_HEAD` on disk with a clean status and no rebase in progress; on
+   `git 2.21.0` (`/usr/local/bin/git`, which is first on `PATH` and is what the
+   test suite runs) it does not. So in any repository where someone has ever
+   resolved a rebase conflict, **every** session is silently `unobserved` —
+   including edit-event sessions, which nothing about a stale file makes
+   unreliable — until the next rebase. The suite could not see it.
+
+2. *A digest difference is only work if the session added something*, measured
+   as net scalar counts against the first boundary. Subtraction on counts rather
+   than content hides real authoring after a dirty start: deleting ten junk
+   files and writing a fifty-line feature, or committing eight WIP files and
+   writing a hundred-line one, both come out `read_only` while the authored file
+   sits visibly in the tree.
+
+Both defects are mine, introduced by the fix for the previous round. The
+reviewer's suggested direction: detect an operation actually in progress from
+the `rebase-merge` and `rebase-apply` directories plus the four markers git does
+remove on completion, dropping `REBASE_HEAD`; and take "added something" from
+per-path content rather than from net counts. Both would need tests that run
+under a git that behaves like `/usr/bin/git`, since the suite passed only
+because of which git is first on `PATH`.
+
+Sub-threshold findings recorded in the graph, not fixed: `git worktree add`,
+`cherry-pick -n`, `checkout BRANCH -- PATH`, `git apply` and un-ignored build
+artefacts all report as `bypass`; writing `.git/MERGE_HEAD` by hand silences a
+real bypass in one command.
 
 ## The objective this replaces, and why
 

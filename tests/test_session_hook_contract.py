@@ -428,9 +428,16 @@ class SessionHookTests(unittest.TestCase):
             self.assertEqual(0, self._start(self._payload(session_id="s3")))
         self.assertEqual("", again.getvalue())
 
-    def test_committed_work_is_reported_though_it_leaves_no_dirty_files(self) -> None:
-        # Committing returns the tree to a clean state, so the snapshots alone
-        # report no changed files at all. The size has to come from the commit.
+    def test_shell_work_committed_inside_one_turn_is_now_silent(self) -> None:
+        # This expectation is inverted deliberately. It used to assert a
+        # report, sized from `git diff` between the two recorded commits. That
+        # sizing could not tell authored work from a pull, so anyone running
+        # `git pull` was accused; the head term went with it.
+        #
+        # What remains is the documented blind spot: a shell edit committed
+        # with no turn boundary in between leaves every snapshot clean and
+        # produces no edit event. It fails towards silence, which is the
+        # direction this module errs in everywhere else.
         self._start()
         (self.repo / "tracked.txt").write_text("base\nmore\n" * 20, encoding="utf-8")
         (self.repo / "second.txt").write_text("new\n", encoding="utf-8")
@@ -441,8 +448,8 @@ class SessionHookTests(unittest.TestCase):
         with mock.patch("sys.stderr", io.StringIO()) as reported:
             outcome = self._start(self._payload(session_id="s2"))
 
-        self.assertEqual(2, outcome)
-        self.assertIn("without recording any task-graph state", reported.getvalue())
+        self.assertEqual(0, outcome)
+        self.assertEqual("", reported.getvalue())
 
     def test_a_session_is_not_judged_on_the_records_it_just_wrote(self) -> None:
         # The opening record of the session asking the question is excluded by
@@ -789,36 +796,41 @@ class SessionHookTests(unittest.TestCase):
 
         self.assertEqual(2, outcome, reported.getvalue())
 
-    def test_a_forged_head_is_never_passed_to_git(self) -> None:
-        # The journal is forgeable by anyone who can write the home, so an
-        # option-shaped head must not reach git as an argument.
-        target = Path(self._directory.name) / "pwned.txt"
-
-        files, lines = worktree.committed_size(
-            self.repo,
-            {"head": f"--output={target}"},
-            {"head": "b" * 40},
-        )
-
-        self.assertEqual((0, 0), (files, lines))
-        self.assertFalse(target.exists())
+    # The forged-head test that stood here is gone with the code it guarded.
+    # A recorded head is no longer passed to git at all, which is a stronger
+    # guarantee than validating it was; SignalTests
+    # test_no_recorded_head_can_reach_a_git_argument_list asserts the absence
+    # end to end rather than the validation.
 
     def test_a_corrupt_count_neither_raises_nor_silences_the_repository(self) -> None:
-        self.assertEqual(
-            (0, 0),
-            worktree.change_size(
-                {"git": True, "files": "lots", "lines": None},
-                {"git": True, "files": "many", "lines": "several"},
-            ),
-        )
+        records = [
+            {
+                "event": "session_open",
+                "snapshot": {"git": True, "files": "lots", "lines": None},
+            },
+            {
+                "event": "session_close",
+                "snapshot": {"git": True, "files": "many", "lines": "several"},
+            },
+        ]
+
+        self.assertEqual((0, 0), session_hooks.session_size(records))
 
     def test_dirt_present_before_the_session_is_not_charged_to_it(self) -> None:
         # Falling back to the absolute file count named files nobody in the
         # session had touched.
-        before = {"git": True, "head": "h", "digest": "a", "files": 5, "lines": 40}
-        after = {"git": True, "head": "h", "digest": "b", "files": 5, "lines": 41}
+        records = [
+            {
+                "event": "session_open",
+                "snapshot": {"git": True, "digest": "a", "files": 5, "lines": 40},
+            },
+            {
+                "event": "session_close",
+                "snapshot": {"git": True, "digest": "b", "files": 5, "lines": 41},
+            },
+        ]
 
-        self.assertEqual((0, 1), worktree.change_size(before, after))
+        self.assertEqual((0, 1), session_hooks.session_size(records))
 
     def test_the_scan_does_not_reach_back_indefinitely(self) -> None:
         # Each candidate weighed costs a git call, and announcing something
@@ -1115,6 +1127,429 @@ class SessionHookTests(unittest.TestCase):
             with mock.patch("sys.version_info", (3, 8, 5)):
                 with self.assertRaises(SystemExit):
                     session_hooks.start_entrypoint()
+
+
+class SignalTests(unittest.TestCase):
+    """A head move says something changed, never who changed it or why.
+
+    Every case here is driven through the real hooks against a real clone of
+    a real upstream, because the defect this replaces was invisible to a
+    suite that constructed its snapshots by hand.
+    """
+
+    def setUp(self) -> None:
+        self._directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._directory.cleanup)
+        self.home = Path(self._directory.name) / "home"
+        self.home.mkdir()
+        self.upstream = Path(self._directory.name) / "upstream"
+        self.upstream.mkdir()
+        _git(self.upstream, "init", "-q")
+        _git(self.upstream, "config", "user.email", "up@example.invalid")
+        _git(self.upstream, "config", "user.name", "up")
+        (self.upstream / "seed.txt").write_text("seed\n", encoding="utf-8")
+        _git(self.upstream, "add", "-A")
+        _git(self.upstream, "commit", "-qm", "seed")
+        self.clone = Path(self._directory.name) / "clone"
+        subprocess.run(
+            ("git", "clone", "-q", str(self.upstream), str(self.clone)),
+            capture_output=True,
+            check=True,
+        )
+        _git(self.clone, "config", "user.email", "me@example.invalid")
+        _git(self.clone, "config", "user.name", "me")
+        self._environment = mock.patch.dict(
+            os.environ,
+            {
+                "GRAPH_HARNESS_HOME": str(self.home),
+                "CLAUDE_PROJECT_DIR": str(self.clone),
+                "CLAUDE_CODE_SESSION_ID": "s1",
+            },
+        )
+        self._environment.start()
+        self.addCleanup(self._environment.stop)
+
+    def _payload(self, session: str) -> str:
+        return json.dumps({"session_id": session, "cwd": str(self.clone)})
+
+    def _open(self, session: str) -> None:
+        with mock.patch("sys.stdin", io.StringIO(self._payload(session))):
+            with mock.patch("sys.stderr", io.StringIO()):
+                session_hooks.session_start()
+
+    def _turn(self, session: str) -> None:
+        with mock.patch("sys.stdin", io.StringIO(self._payload(session))):
+            session_hooks.observe("turn_end", json.loads(self._payload(session)))
+
+    def _close(self, session: str) -> None:
+        with mock.patch("sys.stdin", io.StringIO(self._payload(session))):
+            session_hooks.session_end()
+
+    def _edit(self, session: str, name: str) -> None:
+        payload = json.loads(self._payload(session))
+        payload["tool_name"] = "Edit"
+        payload["tool_input"] = {"file_path": str(self.clone / name)}
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))):
+            session_hooks.record_edit()
+
+    def _write(self, repo: Path, *names: str) -> None:
+        for name in names:
+            (repo / name).write_text(
+                "".join(f"line {index}\n" for index in range(40)), encoding="utf-8"
+            )
+
+    def _found(self) -> dict[str, Any] | None:
+        return session_hooks.previous_bypass(repository_key(self.clone))
+
+    def test_a_pull_is_never_reported(self) -> None:
+        self._open("puller")
+        self._write(self.upstream, "a.txt", "b.txt")
+        _git(self.upstream, "add", "-A")
+        _git(self.upstream, "commit", "-qm", "upstream work")
+        _git(self.clone, "pull", "-q", "--ff-only")
+        self._close("puller")
+
+        self.assertIsNone(self._found())
+
+    def test_a_checkout_is_never_reported(self) -> None:
+        _git(self.clone, "checkout", "-q", "-b", "feature")
+        self._write(self.clone, "a.txt", "b.txt")
+        _git(self.clone, "add", "-A")
+        _git(self.clone, "commit", "-qm", "feature work")
+        _git(self.clone, "checkout", "-q", "master")
+        self._open("checker")
+        _git(self.clone, "checkout", "-q", "feature")
+        self._close("checker")
+
+        self.assertIsNone(self._found())
+
+    def test_a_hard_reset_is_never_reported(self) -> None:
+        self._write(self.clone, "a.txt", "b.txt")
+        _git(self.clone, "add", "-A")
+        _git(self.clone, "commit", "-qm", "local work")
+        self._open("resetter")
+        _git(self.clone, "reset", "-q", "--hard", "HEAD~1")
+        self._close("resetter")
+
+        self.assertIsNone(self._found())
+
+    def test_a_commit_by_someone_else_mid_session_is_never_reported(self) -> None:
+        self._open("bystander")
+        _git(self.clone, "config", "user.email", "other@example.invalid")
+        self._write(self.clone, "a.txt", "b.txt")
+        _git(self.clone, "add", "-A")
+        _git(self.clone, "commit", "-qm", "another terminal")
+        self._close("bystander")
+
+        self.assertIsNone(self._found())
+
+    def test_an_editing_tool_call_is_reported(self) -> None:
+        self._open("editor")
+        self._write(self.clone, "a.py", "b.py")
+        self._edit("editor", "a.py")
+        self._edit("editor", "b.py")
+        self._close("editor")
+
+        found = self._found()
+
+        self.assertIsNotNone(found)
+        assert found is not None
+        self.assertEqual("editor", found["session_id"])
+        self.assertEqual(2, found["changed_files"])
+
+    def test_an_edit_is_reported_even_though_the_work_was_committed(self) -> None:
+        # The tree is clean at both ends. Only the edit record and the
+        # intermediate turn boundary say anything happened.
+        self._open("committer")
+        self._write(self.clone, "a.py", "b.py")
+        self._edit("committer", "a.py")
+        self._edit("committer", "b.py")
+        _git(self.clone, "add", "-A")
+        _git(self.clone, "commit", "-qm", "my own work")
+        self._close("committer")
+
+        found = self._found()
+
+        self.assertIsNotNone(found)
+        assert found is not None
+        self.assertEqual("committer", found["session_id"])
+        # The edit events carry the file count. The line count stays zero
+        # because no turn boundary fell between the edits and the commit, so
+        # no snapshot ever saw the tree dirty. Size is a magnitude reported
+        # from what was observed, never the reason for reporting.
+        self.assertEqual(2, found["changed_files"])
+        self.assertEqual(0, found["changed_lines"])
+
+    def test_a_shell_edit_across_two_turns_is_reported(self) -> None:
+        # No edit event: this is the case the working-tree term exists for.
+        self._open("sheller")
+        self._write(self.clone, "a.txt", "b.txt")
+        self._turn("sheller")
+        self._close("sheller")
+
+        self.assertIsNotNone(self._found())
+
+    def test_a_shell_edit_committed_inside_one_turn_is_the_known_blind_spot(
+        self,
+    ) -> None:
+        # Documented in docs/conformance.md. Pinned here so it cannot change
+        # unnoticed. It errs towards silence, which is the direction this
+        # module errs in everywhere else.
+        self._open("hidden")
+        self._write(self.clone, "a.txt", "b.txt")
+        _git(self.clone, "add", "-A")
+        _git(self.clone, "commit", "-qm", "shell work")
+        self._close("hidden")
+
+        self.assertIsNone(self._found())
+
+    def test_a_read_is_not_an_edit(self) -> None:
+        # The producer accepted any tool carrying a file path, so a Read was
+        # recorded as an edit. Recording a read as authored work is the same
+        # failure class as mistaking a pull for it.
+        payload = json.loads(self._payload("reader"))
+        payload["tool_name"] = "Read"
+        payload["tool_input"] = {"file_path": str(self.clone / "seed.txt")}
+
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))):
+            self.assertEqual(0, session_hooks.record_edit())
+
+        self.assertEqual(
+            [], [e for e in journal.read(self.home) if e.get("event") == "edit"]
+        )
+
+    def _verdict(self, session: str) -> str:
+        from agent_harness import conformance
+
+        found = [
+            item
+            for item in conformance.report(self.home, include_codex=False)["sessions"]
+            if item["session_id"] == session
+        ]
+        self.assertEqual(1, len(found), found)
+        return str(found[0]["verdict"])
+
+    def test_a_conflicted_pull_is_never_reported(self) -> None:
+        # The head term was removed and the dirty-tree term inherited the same
+        # defect: a merge git could not complete leaves conflict markers in the
+        # tree that nobody authored.
+        (self.clone / "seed.txt").write_text("local\n" * 40, encoding="utf-8")
+        _git(self.clone, "commit", "-qam", "local work")
+        (self.upstream / "seed.txt").write_text("theirs\n" * 40, encoding="utf-8")
+        _git(self.upstream, "commit", "-qam", "their work")
+        _git(self.clone, "fetch", "-q")
+        self._open("conflicted")
+        subprocess.run(
+            ("git", "-C", str(self.clone), "pull", "--no-rebase", "-q"),
+            capture_output=True,
+        )
+        self._turn("conflicted")
+        self._close("conflicted")
+
+        self.assertIsNone(self._found())
+        self.assertEqual("unobserved", self._verdict("conflicted"))
+
+    def test_a_conflicted_pull_that_is_aborted_is_never_reported(self) -> None:
+        # The session ends with a byte-identical tree and an unmoved HEAD. It
+        # was still accused, because the size is a maximum across boundaries
+        # and one boundary fell while the merge was open.
+        (self.clone / "seed.txt").write_text("local\n" * 40, encoding="utf-8")
+        _git(self.clone, "commit", "-qam", "local work")
+        (self.upstream / "seed.txt").write_text("theirs\n" * 40, encoding="utf-8")
+        _git(self.upstream, "commit", "-qam", "their work")
+        _git(self.clone, "fetch", "-q")
+        self._open("aborter")
+        subprocess.run(
+            ("git", "-C", str(self.clone), "pull", "--no-rebase", "-q"),
+            capture_output=True,
+        )
+        self._turn("aborter")
+        _git(self.clone, "merge", "--abort")
+        self._close("aborter")
+
+        self.assertEqual(
+            "",
+            subprocess.run(
+                ("git", "-C", str(self.clone), "status", "--porcelain"),
+                capture_output=True,
+                text=True,
+            ).stdout,
+        )
+        self.assertIsNone(self._found())
+        self.assertEqual("unobserved", self._verdict("aborter"))
+
+    def test_a_submodule_update_is_never_reported(self) -> None:
+        far = Path(self._directory.name) / "far"
+        far.mkdir()
+        _git(far, "init", "-q")
+        _git(far, "config", "user.email", "far@example.invalid")
+        _git(far, "config", "user.name", "far")
+        (far / "one.txt").write_text("one\n", encoding="utf-8")
+        _git(far, "add", "-A")
+        _git(far, "commit", "-qm", "one")
+        subprocess.run(
+            (
+                "git",
+                "-C",
+                str(self.clone),
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                str(far),
+                "vendor",
+            ),
+            capture_output=True,
+            check=True,
+        )
+        _git(self.clone, "commit", "-qam", "add submodule")
+        (far / "one.txt").write_text("one\ntwo\nthree\n", encoding="utf-8")
+        _git(far, "commit", "-qam", "far moves on")
+
+        self._open("submoduler")
+        subprocess.run(
+            (
+                "git",
+                "-C",
+                str(self.clone),
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "update",
+                "--remote",
+                "-q",
+            ),
+            capture_output=True,
+        )
+        self._turn("submoduler")
+        self._close("submoduler")
+
+        self.assertIsNone(self._found())
+        self.assertEqual("read_only", self._verdict("submoduler"))
+
+    def test_discarding_dirt_that_was_there_first_is_not_work(self) -> None:
+        # git checkout -- ., git clean -fd and git reset --hard all move the
+        # tree without adding anything. The hook stayed silent only because
+        # the size was below the threshold, while the report called it bypass.
+        self._write(self.clone, "a.txt", "b.txt")
+        self._open("cleaner")
+        _git(self.clone, "checkout", "--", ".")
+        subprocess.run(
+            ("git", "-C", str(self.clone), "clean", "-fdq"), capture_output=True
+        )
+        self._turn("cleaner")
+        self._close("cleaner")
+
+        self.assertIsNone(self._found())
+        self.assertEqual("read_only", self._verdict("cleaner"))
+
+    def test_a_hard_reset_over_pre_session_dirt_is_not_work(self) -> None:
+        self._write(self.clone, "a.txt", "b.txt")
+        _git(self.clone, "add", "-A")
+        self._open("resetter2")
+        _git(self.clone, "reset", "-q", "--hard")
+        self._turn("resetter2")
+        self._close("resetter2")
+
+        self.assertIsNone(self._found())
+        self.assertEqual("read_only", self._verdict("resetter2"))
+
+    def test_created_files_are_sized_in_lines_and_not_announced_as_zero(self) -> None:
+        # Untracked content contributes nothing to git diff --shortstat, so a
+        # session that creates files was announced as changing zero lines.
+        self._open("creator")
+        self._write(self.clone, "new_a.txt", "new_b.txt")
+        self._turn("creator")
+        self._close("creator")
+
+        found = self._found()
+
+        self.assertIsNotNone(found)
+        assert found is not None
+        self.assertEqual(2, found["changed_files"])
+        self.assertEqual(80, found["changed_lines"])
+
+    def test_a_stash_pop_is_the_one_remaining_false_positive(self) -> None:
+        # Pinned as a known false positive rather than left to be discovered.
+        # `git stash pop` materialises real content into the tree and leaves
+        # no marker of its own, so it is indistinguishable from authoring.
+        # Recorded here and in docs/conformance.md so the claim that pulls and
+        # checkouts are silent is not read as covering every git command.
+        self._write(self.clone, "a.txt", "b.txt")
+        _git(self.clone, "add", "-A")
+        _git(self.clone, "stash", "-q")
+        self._open("popper")
+        _git(self.clone, "stash", "pop", "-q")
+        self._turn("popper")
+        self._close("popper")
+
+        self.assertIsNotNone(self._found())
+
+    def test_work_committed_before_every_turn_boundary_is_invisible(self) -> None:
+        # The blind spot is wider than one turn: committing before each
+        # boundary hides a whole session's shell-written work, because every
+        # snapshot is then clean. Pinned so the documented width stays true.
+        self._open("hider")
+        for round_number in range(3):
+            self._write(self.clone, f"r{round_number}_a.txt", f"r{round_number}_b.txt")
+            _git(self.clone, "add", "-A")
+            _git(self.clone, "commit", "-qm", f"round {round_number}")
+            self._turn("hider")
+        self._close("hider")
+
+        self.assertIsNone(self._found())
+
+    def test_edits_under_an_ignored_path_are_invisible(self) -> None:
+        # Outside the documented blind spot entirely: git never reports these
+        # paths, so no snapshot can see them.
+        (self.clone / ".gitignore").write_text("build/\n", encoding="utf-8")
+        _git(self.clone, "add", "-A")
+        _git(self.clone, "commit", "-qm", "ignore build")
+        (self.clone / "build").mkdir()
+        self._open("ignorer")
+        self._write(self.clone / "build", "a.txt", "b.txt")
+        self._turn("ignorer")
+        self._close("ignorer")
+
+        self.assertIsNone(self._found())
+
+    def test_commit_sizing_is_gone(self) -> None:
+        self.assertFalse(hasattr(worktree, "committed_size"))
+        self.assertFalse(hasattr(worktree, "COMMIT_NAME"))
+
+    def test_no_recorded_head_can_reach_a_git_argument_list(self) -> None:
+        self._open("forger")
+        journal.append(
+            journal.record(
+                "turn_end",
+                client="claude",
+                session_id="forger",
+                repo=repository_key(self.clone),
+                snapshot={
+                    "git": True,
+                    "head": "--output=/tmp/forged",
+                    "digest": "different",
+                    "files": 9,
+                    "lines": 90,
+                    "degraded": False,
+                },
+            ),
+            self.home,
+        )
+        self._close("forger")
+        runs: list[tuple[str, ...]] = []
+        real_run = subprocess.run
+
+        def counted(arguments: Any, **options: Any) -> Any:
+            runs.append(tuple(arguments))
+            return real_run(arguments, **options)
+
+        with mock.patch("subprocess.run", counted):
+            self._found()
+
+        self.assertEqual([], [run for run in runs if "--output=/tmp/forged" in run])
+        self.assertFalse(Path("/tmp/forged").exists())
 
 
 if __name__ == "__main__":

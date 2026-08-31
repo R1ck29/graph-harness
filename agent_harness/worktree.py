@@ -3,18 +3,21 @@
 A session that ignores the protocol may edit through the shell rather than an
 editing tool, so counting a client's editing tool calls misses exactly the case
 worth catching. Comparing the working tree before and after is independent of
-how the edit was made.
+how the edit was made, and is one of the two terms the signal rests on; the
+other is an edit event, which says which session's agent did the writing.
 
-Both terms of the comparison are required. The digest alone misses a session
-that commits its work, because committing returns the tree to the state the
-digest already recorded; ``HEAD`` alone misses uncommitted work.
+``HEAD`` is recorded but never compared. A head move says something changed and
+cannot say who changed it or why: authoring, pulling, checking out, rebasing
+and a colleague's commit in another terminal are one observation. Judging on it
+reported anyone who ran ``git pull`` as having bypassed the protocol. What a
+commit of the session's own work leaves behind is caught instead by comparing
+consecutive turn boundaries, one of which saw the tree dirty.
 """
 
 from __future__ import annotations
 
 import hashlib
 import os
-import re
 import subprocess
 import time
 from pathlib import Path
@@ -32,15 +35,23 @@ SNAPSHOT_BUDGET_SECONDS = 4.0
 # by their size, which keeps a session that drops a build artifact cheap.
 MAX_UNTRACKED_BYTES = 1_048_576
 
+# Markers git leaves in its own directory while an operation it could not
+# finish is still open. A conflicted merge, rebase, cherry-pick or revert
+# fills the tree with content nobody authored, so a snapshot taken while one
+# is open is not evidence of anything a session did.
+OPERATION_MARKERS = (
+    "MERGE_HEAD",
+    "REBASE_HEAD",
+    "CHERRY_PICK_HEAD",
+    "REVERT_HEAD",
+    "BISECT_LOG",
+    "rebase-merge",
+    "rebase-apply",
+)
+
 # Hashed in place of a diff git could not produce, so an unborn HEAD or a
 # timed-out call is visible in the digest instead of reading as an empty diff.
 DEGRADED_SENTINEL = b"\x01degraded"
-
-# Recorded HEAD values reach git as arguments. The journal is forgeable by
-# anyone who can write the user's home, so a value that is not a commit name
-# is refused rather than passed through, where an option-shaped one would
-# make git act on it.
-COMMIT_NAME = re.compile(r"[0-9a-f]{40}")
 
 
 def _git(repo: Path, *arguments: str, deadline: float | None = None) -> str | None:
@@ -114,6 +125,30 @@ def _changed_lines(shortstat: str) -> int:
     return total
 
 
+def _operation(repo: Path, git_directory: str | None) -> str | None:
+    """Name the git operation still open in *repo*, if there is one.
+
+    A conflicted merge, rebase, cherry-pick or revert fills the working tree
+    with content nobody authored, and aborting it afterwards does not undo the
+    observation: the size a session is charged is a maximum across its
+    boundaries, so one boundary taken mid-conflict accuses a session whose net
+    effect on the repository was nothing at all.
+    """
+
+    if git_directory is None:
+        return None
+    root = Path(git_directory.strip())
+    if not root.is_absolute():
+        root = repo / root
+    for marker in OPERATION_MARKERS:
+        try:
+            if (root / marker).exists():
+                return marker
+        except OSError:
+            return None
+    return None
+
+
 def snapshot(directory: str | os.PathLike[str]) -> dict[str, Any]:
     """Return a comparable description of the working tree at *directory*.
 
@@ -132,6 +167,7 @@ def snapshot(directory: str | os.PathLike[str]) -> dict[str, Any]:
         return {
             "git": False,
             "head": None,
+            "operation": None,
             "digest": None,
             "files": 0,
             "lines": 0,
@@ -141,7 +177,15 @@ def snapshot(directory: str | os.PathLike[str]) -> dict[str, Any]:
     inside = _git(repo, "rev-parse", "--is-inside-work-tree", deadline=deadline)
     if inside is None or inside.strip() != "true":
         return absent()
-    status = _git(repo, "status", "-z", "--porcelain=v1", "-uall", deadline=deadline)
+    status = _git(
+        repo,
+        "status",
+        "-z",
+        "--porcelain=v1",
+        "-uall",
+        "--ignore-submodules=all",
+        deadline=deadline,
+    )
     if status is None:
         return absent()
     entries = _status_entries(status)
@@ -151,7 +195,10 @@ def snapshot(directory: str | os.PathLike[str]) -> dict[str, Any]:
     # ``diff HEAD`` fails outright before the first commit, which would drop the
     # content term without saying so. The staged and unstaged diffs together
     # cover the same ground and both work with an unborn HEAD.
-    for arguments in (("diff",), ("diff", "--cached")):
+    for arguments in (
+        ("diff", "--ignore-submodules=all"),
+        ("diff", "--cached", "--ignore-submodules=all"),
+    ):
         rendered = _git(repo, *arguments, deadline=deadline)
         digest.update(b"\0")
         if rendered is None:
@@ -159,6 +206,7 @@ def snapshot(directory: str | os.PathLike[str]) -> dict[str, Any]:
             digest.update(DEGRADED_SENTINEL)
         else:
             digest.update(rendered.encode("utf-8", "replace"))
+    created = 0
     for code, path in entries:
         if code != "??":
             continue
@@ -169,13 +217,25 @@ def snapshot(directory: str | os.PathLike[str]) -> dict[str, Any]:
             size = target.stat().st_size
             digest.update(str(size).encode("ascii"))
             if target.is_file() and size <= MAX_UNTRACKED_BYTES:
-                digest.update(target.read_bytes())
+                content = target.read_bytes()
+                digest.update(content)
+                # A created file contributes nothing to git diff, so a session
+                # that wrote ten thousand new lines was announced as changing
+                # none. Counted here, where the bytes are already in hand.
+                created += content.count(b"\n") + (
+                    1 if content and not content.endswith(b"\n") else 0
+                )
         except OSError:
             digest.update(b"?")
+    git_directory = _git(repo, "rev-parse", "--git-dir", deadline=deadline)
+    operation = _operation(repo, git_directory)
     rendered_head = _git(repo, "rev-parse", "HEAD", deadline=deadline)
     head = (rendered_head or "").strip() or None
-    lines = 0
-    for counted in (("diff", "--shortstat"), ("diff", "--cached", "--shortstat")):
+    lines = created
+    for counted in (
+        ("diff", "--shortstat", "--ignore-submodules=all"),
+        ("diff", "--cached", "--shortstat", "--ignore-submodules=all"),
+    ):
         counted_output = _git(repo, *counted, deadline=deadline)
         if counted_output is None:
             degraded = True
@@ -183,6 +243,7 @@ def snapshot(directory: str | os.PathLike[str]) -> dict[str, Any]:
     return {
         "git": True,
         "head": head,
+        "operation": operation,
         "digest": digest.hexdigest(),
         "files": len(entries),
         "lines": lines,
@@ -195,38 +256,13 @@ def snapshot(directory: str | os.PathLike[str]) -> dict[str, Any]:
     }
 
 
-def committed_size(
-    directory: str | os.PathLike[str], before: Any, after: Any
-) -> tuple[int, int]:
-    """Return the file and line counts of the commits between two snapshots.
+def dirty_changed(before: Any, after: Any) -> bool:
+    """Report whether the working tree itself differs between two snapshots.
 
-    A session that commits leaves a clean working tree, so the snapshots alone
-    say only that ``HEAD`` moved. Asking git what moved distinguishes work the
-    session did from a pull, a checkout, or a commit made elsewhere that
-    happens to have landed while it ran.
-    """
-
-    if not isinstance(before, dict) or not isinstance(after, dict):
-        return (0, 0)
-    start, end = before.get("head"), after.get("head")
-    if not isinstance(start, str) or not isinstance(end, str) or start == end:
-        return (0, 0)
-    if not COMMIT_NAME.fullmatch(start) or not COMMIT_NAME.fullmatch(end):
-        return (0, 0)
-    repo = Path(directory)
-    deadline = time.monotonic() + SNAPSHOT_BUDGET_SECONDS
-    shortstat = _git(repo, "diff", "--shortstat", start, end, "--", deadline=deadline)
-    if shortstat is None:
-        return (0, 0)
-    names = _git(repo, "diff", "--name-only", start, end, "--", deadline=deadline) or ""
-    return (
-        len([name for name in names.splitlines() if name]),
-        _changed_lines(shortstat),
-    )
-
-
-def changed(before: Any, after: Any) -> bool:
-    """Report whether the tree moved between two snapshots.
+    ``HEAD`` is deliberately not compared; see this module's own docstring for
+    why. Named for what it measures, because the previous name said only
+    "changed" and three review rounds were spent on what that was taken to
+    mean.
 
     An absent or malformed endpoint reports no change: the caller records that
     as low confidence rather than accusing a session on missing evidence.
@@ -236,13 +272,10 @@ def changed(before: Any, after: Any) -> bool:
         return False
     if not before.get("git") or not after.get("git"):
         return False
-    return bool(
-        before.get("head") != after.get("head")
-        or before.get("digest") != after.get("digest")
-    )
+    return bool(before.get("digest") != after.get("digest"))
 
 
-def _count(value: Any) -> int:
+def recorded_count(value: Any) -> int:
     """Return a recorded count, treating anything else as absent.
 
     Every other check in this module tests the type before using a recorded
@@ -252,18 +285,3 @@ def _count(value: Any) -> int:
     """
 
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
-
-
-def change_size(before: Any, after: Any) -> tuple[int, int]:
-    """Return the changed file and line counts implied by two snapshots.
-
-    Both are differences. A tree that was already dirty when the session
-    started is not the session's doing, and charging it the absolute count
-    produced reports naming files nobody in that session touched.
-    """
-
-    if not isinstance(before, dict) or not isinstance(after, dict):
-        return (0, 0)
-    files = max(_count(after.get("files")) - _count(before.get("files")), 0)
-    lines = abs(_count(after.get("lines")) - _count(before.get("lines")))
-    return (files, lines)

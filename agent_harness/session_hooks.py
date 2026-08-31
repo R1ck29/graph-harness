@@ -141,7 +141,11 @@ def record_edit() -> int:
     if payload is None:
         return 0
     tool = payload.get("tool_name")
-    if not isinstance(tool, str) or not tool:
+    # A read is not authored work. The producer accepted any tool carrying a
+    # file path, so a Read was recorded as an edit; leaving the filtering to
+    # the installer's matcher made the record mean whatever the client
+    # happened to be configured with.
+    if not isinstance(tool, str) or tool not in EDIT_TOOLS:
         return 0
     target = payload.get("tool_input")
     named = target.get("file_path") if isinstance(target, dict) else None
@@ -198,23 +202,107 @@ def judgeable(opened: dict[str, Any], ended: dict[str, Any]) -> bool:
     return bool(before.get("git")) and bool(after.get("git"))
 
 
-def worth_reporting(repo: str, before: Any, after: Any) -> tuple[bool, int, int]:
-    """Judge whether a change is large enough to mention, and how large.
+def observation_sound(records: list[dict[str, Any]]) -> bool:
+    """Report whether a session was observed well enough to be judged at all.
 
-    Committing returns the working tree to a clean state, so the snapshots
-    alone say only that ``HEAD`` moved; judged on the tree they describe, the
-    most deliberate kind of change would go unmentioned. Git is asked what
-    actually moved between the two commits, which counts the work and leaves
-    a pull, a checkout, or a commit made in another terminal at the size they
-    really are.
+    Two ways it is not. A degraded snapshot is not evidence in either
+    direction. And a snapshot taken while git had a merge, rebase, cherry-pick
+    or revert still open describes a tree git filled in, not one the session
+    wrote; because the size charged is a maximum across boundaries, a single
+    such boundary would otherwise accuse a session that aborted the operation
+    and left the repository exactly as it found it.
     """
 
-    if not worktree.changed(before, after):
+    snapshots = _snapshots(records)
+    if not snapshots:
+        return False
+    return not any(
+        shot.get("degraded") or shot.get("operation") or not shot.get("git")
+        for shot in snapshots
+    )
+
+
+def _snapshots(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        snapshot
+        for snapshot in (record.get("snapshot") for record in records)
+        if isinstance(snapshot, dict)
+    ]
+
+
+def edited(records: list[dict[str, Any]]) -> bool:
+    """Report whether one session's own records show it changed code.
+
+    Two terms, and both are needed. An edit event is direct evidence that this
+    session's agent wrote a file. A working tree that differs between two
+    consecutive turn boundaries covers edits made through the shell, which is
+    how a session that ignores the protocol is likely to edit.
+
+    Neither term is a head move. Comparing the two ends of a session would
+    also miss work that was committed before it closed, which is why the
+    comparison runs over every boundary rather than over the outer pair.
+    """
+
+    if any(record.get("event") == "edit" for record in records):
+        return True
+    snapshots = _snapshots(records)
+    if not any(
+        worktree.dirty_changed(before, after)
+        for before, after in zip(snapshots, snapshots[1:])
+    ):
+        return False
+    # The tree moved, but moving it is not the same as adding to it. Throwing
+    # away dirt that was already there — `git checkout -- .`, `git clean`, a
+    # hard reset — changes the digest while authoring nothing, and was
+    # classified as a bypass of zero files and zero lines.
+    files, lines = session_size(records)
+    return files > 0 or lines > 0
+
+
+def session_size(records: list[dict[str, Any]]) -> tuple[int, int]:
+    """Return how much one session changed, as a magnitude and never a trigger.
+
+    The maximum across boundaries rather than the difference between the two
+    ends: a session that edits and then commits returns the tree to clean, and
+    the outer pair would size that work at zero. A tree that was already dirty
+    when the session started is not the session's doing, so the first
+    boundary is the baseline rather than absolute counts.
+    """
+
+    distinct = {
+        record.get("path_id")
+        for record in records
+        if record.get("event") == "edit" and isinstance(record.get("path_id"), str)
+    }
+    snapshots = _snapshots(records)
+    if not snapshots:
+        return (len(distinct), 0)
+    first = snapshots[0]
+    files = max(
+        (
+            worktree.recorded_count(shot.get("files"))
+            - worktree.recorded_count(first.get("files"))
+            for shot in snapshots
+        ),
+        default=0,
+    )
+    lines = max(
+        (
+            worktree.recorded_count(shot.get("lines"))
+            - worktree.recorded_count(first.get("lines"))
+            for shot in snapshots
+        ),
+        default=0,
+    )
+    return (max(len(distinct), files, 0), max(lines, 0))
+
+
+def worth_reporting(records: list[dict[str, Any]]) -> tuple[bool, int, int]:
+    """Judge whether one session's work is large enough to mention, and how large."""
+
+    if not observation_sound(records) or not edited(records):
         return (False, 0, 0)
-    files, lines = worktree.change_size(before, after)
-    committed_files, committed_lines = worktree.committed_size(repo, before, after)
-    files = max(files, committed_files)
-    lines = max(lines, committed_lines)
+    files, lines = session_size(records)
     return (files >= WARN_MIN_FILES or lines >= WARN_MIN_LINES, files, lines)
 
 
@@ -251,6 +339,7 @@ def previous_bypass(
 
     opens: dict[str, tuple[int, dict[str, Any]]] = {}
     ends: dict[str, tuple[int, dict[str, Any]]] = {}
+    owned: dict[str, list[dict[str, Any]]] = {}
     transitions: list[int] = []
     attributed: dict[str, list[int]] = {}
     reported: set[str] = set()
@@ -286,6 +375,9 @@ def previous_bypass(
         # session is still running, so its own records say nothing yet.
         if position >= cut:
             continue
+        if event not in {"session_open", "turn_end", "session_close", "edit"}:
+            continue
+        owned.setdefault(session, []).append(entry)
         if event == "session_open":
             opens.setdefault(session, (position, entry))
         elif event in {"turn_end", "session_close"}:
@@ -317,9 +409,7 @@ def previous_bypass(
             return None
         if session in reported or not judgeable(opened, ended):
             continue
-        reportable, files, lines = worth_reporting(
-            repo, opened.get("snapshot"), ended.get("snapshot")
-        )
+        reportable, files, lines = worth_reporting(owned.get(session, []))
         if not reportable:
             continue
         return {
