@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -1470,12 +1471,37 @@ class SignalTests(unittest.TestCase):
         self.assertEqual(2, found["changed_files"])
         self.assertEqual(80, found["changed_lines"])
 
-    def test_a_stash_pop_is_the_one_remaining_false_positive(self) -> None:
-        # Pinned as a known false positive rather than left to be discovered.
-        # `git stash pop` materialises real content into the tree and leaves
-        # no marker of its own, so it is indistinguishable from authoring.
-        # Recorded here and in docs/conformance.md so the claim that pulls and
-        # checkouts are silent is not read as covering every git command.
+    def test_content_that_appears_without_being_written_is_reported(self) -> None:
+        # A family, not one command. `git stash pop`, `git apply`,
+        # `cherry-pick -n`, `checkout BRANCH -- PATH` and an un-ignored build
+        # output all put content in the tree that nobody typed, leave no
+        # marker git removes, and are indistinguishable from authoring by any
+        # observation of the tree alone. Pinned and documented rather than
+        # left to be discovered one command at a time, which is how the last
+        # three review rounds went.
+        patch = Path(self._directory.name) / "change.patch"
+        patch.write_text(
+            "diff --git a/p.txt b/p.txt\n"
+            "new file mode 100644\n"
+            "--- /dev/null\n"
+            "+++ b/p.txt\n"
+            "@@ -0,0 +1,3 @@\n"
+            "+one\n+two\n+three\n",
+            encoding="utf-8",
+        )
+        self._open("applier")
+        subprocess.run(
+            ("git", "-C", str(self.clone), "apply", str(patch)),
+            capture_output=True,
+            check=False,
+        )
+        self._turn("applier")
+        self._close("applier")
+
+        self.assertEqual("bypass", self._verdict("applier"))
+
+    def test_a_stash_pop_is_a_known_false_positive(self) -> None:
+        # The same family as the test above.
         self._write(self.clone, "a.txt", "b.txt")
         _git(self.clone, "add", "-A")
         _git(self.clone, "stash", "-q")
@@ -1513,6 +1539,168 @@ class SignalTests(unittest.TestCase):
         self._close("ignorer")
 
         self.assertIsNone(self._found())
+
+    def _git_dir(self) -> Path:
+        return self.clone / ".git"
+
+    def test_a_leftover_rebase_head_does_not_silence_a_real_bypass(self) -> None:
+        # git does not remove REBASE_HEAD when a rebase finishes: on git
+        # 2.50.1 it survives the completed rebase, later commits, a checkout,
+        # a merge and a gc, and is cleared only by the next rebase. Treating
+        # it as an open operation made every session in such a repository
+        # silently unobserved. The state is constructed here rather than
+        # produced by a rebase, so the test does not depend on which git is
+        # first on PATH — which is exactly how this defect got through.
+        (self._git_dir() / "REBASE_HEAD").write_text("a" * 40, encoding="utf-8")
+        self._open("rebased")
+        self._write(self.clone, "a.txt", "b.txt")
+        self._turn("rebased")
+        self._close("rebased")
+
+        found = self._found()
+
+        self.assertIsNotNone(found)
+        assert found is not None
+        self.assertEqual("rebased", found["session_id"])
+
+    def test_a_leftover_rebase_head_does_not_silence_an_editing_tool_session(
+        self,
+    ) -> None:
+        (self._git_dir() / "REBASE_HEAD").write_text("a" * 40, encoding="utf-8")
+        self._open("rebased2")
+        self._write(self.clone, "a.py", "b.py")
+        self._edit("rebased2", "a.py")
+        self._edit("rebased2", "b.py")
+        self._close("rebased2")
+
+        self.assertIsNotNone(self._found())
+
+    def test_a_rebase_actually_in_progress_is_not_judged(self) -> None:
+        # The directories are what git creates while a rebase is open and
+        # removes when it finishes or is aborted.
+        for marker in ("rebase-merge", "rebase-apply"):
+            with self.subTest(marker=marker):
+                directory = self._git_dir() / marker
+                directory.mkdir()
+                session = f"rebasing-{marker}"
+                self._open(session)
+                self._write(self.clone, "a.txt", "b.txt")
+                self._turn(session)
+                self._close(session)
+
+                self.assertEqual("unobserved", self._verdict(session))
+                shutil.rmtree(directory)
+
+    def test_deleting_junk_and_writing_a_feature_is_reported(self) -> None:
+        # Reported by review: subtracting scalar counts made a session that
+        # removes more than it adds look like it authored nothing, while the
+        # file it wrote sat visibly in the tree.
+        junk = self.clone / "junk"
+        junk.mkdir()
+        self._write(junk, *[f"j{index}.txt" for index in range(10)])
+        self._open("cleaner-author")
+        shutil.rmtree(junk)
+        self._write(self.clone, "real_feature.py")
+        self._turn("cleaner-author")
+        self._close("cleaner-author")
+
+        self.assertIsNotNone(self._found())
+        self.assertEqual("bypass", self._verdict("cleaner-author"))
+
+    def test_committing_work_in_progress_then_writing_more_is_reported(self) -> None:
+        self._write(self.clone, *[f"w{index}.txt" for index in range(8)])
+        self._open("committer-author")
+        _git(self.clone, "add", "-A")
+        _git(self.clone, "commit", "-qm", "wip")
+        self._write(self.clone, "sneaky.py")
+        self._turn("committer-author")
+        self._close("committer-author")
+
+        self.assertIsNotNone(self._found())
+        self.assertEqual("bypass", self._verdict("committer-author"))
+
+    def test_discarding_a_file_then_rewriting_it_is_reported(self) -> None:
+        big = self.clone / "big.py"
+        self._write(self.clone, "big.py")
+        _git(self.clone, "add", "-A")
+        _git(self.clone, "commit", "-qm", "big")
+        big.write_text("".join(f"dirty {i}\n" for i in range(40)), encoding="utf-8")
+        self._open("rewriter")
+        _git(self.clone, "checkout", "--", "big.py")
+        big.write_text("".join(f"fresh {i}\n" for i in range(40)), encoding="utf-8")
+        self._turn("rewriter")
+        self._close("rewriter")
+
+        # The rewrite is detected — the report calls it a bypass rather than
+        # read_only, which is what attempt 2 got wrong. The hook stays silent
+        # because the magnitude cannot be established: the dirt it replaced
+        # was the same size, so the difference is zero and charging the whole
+        # file to the session would charge it dirt it inherited. Silence over
+        # a number that would be a guess.
+        self.assertEqual("bypass", self._verdict("rewriter"))
+        self.assertIsNone(self._found())
+
+    def _other_git(self) -> str | None:
+        """Find a git other than the one first on PATH, if the system has one.
+
+        The REBASE_HEAD defect survived a green suite because git 2.21 is
+        first on PATH here and removes the file, while git 2.50 does not. A
+        suite that exercises one git cannot see a difference between gits.
+        """
+
+        found = subprocess.run(
+            ("which", "-a", "git"), capture_output=True, text=True, check=False
+        ).stdout.split()
+        primary = found[0] if found else None
+        for candidate in found[1:]:
+            if candidate != primary and Path(candidate).exists():
+                return candidate
+        return None
+
+    def test_a_completed_rebase_does_not_silence_the_next_session(self) -> None:
+        # End to end under a second git, because the marker git leaves behind
+        # differs by version and that is what hid the defect. Skipped rather
+        # than faked when the machine has only one git.
+        other = self._other_git()
+        if other is None:
+            self.skipTest("only one git on this system")
+
+        def run(*arguments: str) -> None:
+            subprocess.run(
+                (other, "-C", str(self.clone), *arguments),
+                capture_output=True,
+                check=False,
+            )
+
+        run("checkout", "-q", "-b", "side")
+        (self.clone / "seed.txt").write_text("side" + chr(10), encoding="utf-8")
+        run("commit", "-qam", "side")
+        run("checkout", "-q", "master")
+        (self.clone / "seed.txt").write_text("main" + chr(10), encoding="utf-8")
+        run("commit", "-qam", "main")
+        run("checkout", "-q", "side")
+        run("rebase", "master")
+        (self.clone / "seed.txt").write_text("resolved" + chr(10), encoding="utf-8")
+        run("add", "seed.txt")
+        subprocess.run(
+            (other, "-C", str(self.clone), "rebase", "--continue"),
+            capture_output=True,
+            check=False,
+            env={**os.environ, "GIT_EDITOR": "true"},
+        )
+        self.assertFalse((self.clone / ".git/rebase-merge").exists())
+        self.assertFalse((self.clone / ".git/rebase-apply").exists())
+
+        self._open("after-rebase")
+        self._write(self.clone, "a.txt", "b.txt")
+        self._turn("after-rebase")
+        self._close("after-rebase")
+
+        found = self._found()
+
+        self.assertIsNotNone(found, f"silenced under {other}")
+        assert found is not None
+        self.assertEqual("after-rebase", found["session_id"])
 
     def test_commit_sizing_is_gone(self) -> None:
         self.assertFalse(hasattr(worktree, "committed_size"))

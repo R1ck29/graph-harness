@@ -37,6 +37,7 @@ class DocumentationContractTests(unittest.TestCase):
             "MAX_JOURNAL_LINE_BYTES": journal.MAX_JOURNAL_LINE_BYTES,
             "MAX_JOURNAL_MONTHS": journal.MAX_JOURNAL_MONTHS,
             "MAX_UNTRACKED_BYTES": worktree.MAX_UNTRACKED_BYTES,
+            "MAX_SNAPSHOT_PATHS": worktree.MAX_SNAPSHOT_PATHS,
             "WARN_MIN_FILES": session_hooks.WARN_MIN_FILES,
             "WARN_MIN_LINES": session_hooks.WARN_MIN_LINES,
             "MAX_CANDIDATES": session_hooks.MAX_CANDIDATES,

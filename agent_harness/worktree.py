@@ -39,15 +39,28 @@ MAX_UNTRACKED_BYTES = 1_048_576
 # finish is still open. A conflicted merge, rebase, cherry-pick or revert
 # fills the tree with content nobody authored, so a snapshot taken while one
 # is open is not evidence of anything a session did.
+#
+# Every entry here is one git removes when the operation ends. REBASE_HEAD is
+# deliberately absent: git 2.50.1 leaves it behind after a completed rebase,
+# where it survives later commits, a checkout, a merge and a gc and is cleared
+# only by the next rebase. Treating it as an open operation made every session
+# in such a repository silently unobserved, including sessions whose edits
+# were recorded by tool events, which no stale file makes unreliable.
 OPERATION_MARKERS = (
     "MERGE_HEAD",
-    "REBASE_HEAD",
     "CHERRY_PICK_HEAD",
     "REVERT_HEAD",
     "BISECT_LOG",
     "rebase-merge",
     "rebase-apply",
 )
+
+# How many dirty paths a snapshot names, as hashes. The set is what
+# distinguishes work a session added from dirt it threw away; the bound keeps
+# one record inside MAX_JOURNAL_LINE_BYTES. Beyond it the snapshot says so and
+# the coarser count comparison is used instead.
+MAX_SNAPSHOT_PATHS = 80
+SNAPSHOT_PATH_CHARACTERS = 8
 
 # Hashed in place of a diff git could not produce, so an unborn HEAD or a
 # timed-out call is visible in the digest instead of reading as an empty diff.
@@ -168,6 +181,8 @@ def snapshot(directory: str | os.PathLike[str]) -> dict[str, Any]:
             "git": False,
             "head": None,
             "operation": None,
+            "paths": [],
+            "paths_truncated": False,
             "digest": None,
             "files": 0,
             "lines": 0,
@@ -189,6 +204,15 @@ def snapshot(directory: str | os.PathLike[str]) -> dict[str, Any]:
     if status is None:
         return absent()
     entries = _status_entries(status)
+    # Hashed for the same reason edit records hash theirs: a filename can name
+    # a customer, and this file must never carry one.
+    dirty = sorted(
+        hashlib.sha256(path.encode("utf-8", "replace")).hexdigest()[
+            :SNAPSHOT_PATH_CHARACTERS
+        ]
+        for _, path in entries
+    )
+    truncated = len(dirty) > MAX_SNAPSHOT_PATHS
     digest = hashlib.sha256()
     digest.update("\n".join(f"{code} {path}" for code, path in entries).encode("utf-8"))
     degraded = False
@@ -244,6 +268,8 @@ def snapshot(directory: str | os.PathLike[str]) -> dict[str, Any]:
         "git": True,
         "head": head,
         "operation": operation,
+        "paths": dirty[:MAX_SNAPSHOT_PATHS],
+        "paths_truncated": truncated,
         "digest": digest.hexdigest(),
         "files": len(entries),
         "lines": lines,

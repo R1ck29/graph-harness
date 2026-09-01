@@ -255,18 +255,81 @@ def edited(records: list[dict[str, Any]]) -> bool:
     # away dirt that was already there — `git checkout -- .`, `git clean`, a
     # hard reset — changes the digest while authoring nothing, and was
     # classified as a bypass of zero files and zero lines.
-    files, lines = session_size(records)
-    return files > 0 or lines > 0
+    return _added_something(snapshots)
+
+
+def _added_something(snapshots: list[dict[str, Any]]) -> bool:
+    """Report whether some boundary holds a dirty path the first one did not.
+
+    Compared per path rather than by counting. Subtracting counts made a
+    session that removes more than it adds look like it authored nothing: ten
+    junk files deleted and one real feature written came out as fewer dirty
+    files than it started with, and the feature sat visibly in the tree while
+    the session was reported as read-only.
+
+    Paths are hashed, and a session dirtier than the bound records that it was
+    truncated. There the coarser count comparison is the only thing left, and
+    it is used rather than guessing.
+    """
+
+    if not snapshots:
+        return False
+    first = snapshots[0]
+    if any(shot.get("paths_truncated") for shot in snapshots):
+        files = max(
+            (
+                worktree.recorded_count(shot.get("files"))
+                - worktree.recorded_count(first.get("files"))
+                for shot in snapshots
+            ),
+            default=0,
+        )
+        lines = max(
+            (
+                worktree.recorded_count(shot.get("lines"))
+                - worktree.recorded_count(first.get("lines"))
+                for shot in snapshots
+            ),
+            default=0,
+        )
+        return files > 0 or lines > 0
+    baseline = _path_set(first)
+    for shot in snapshots[1:]:
+        own = _path_set(shot)
+        if own - baseline:
+            # A path is dirty that was not dirty before: something was written.
+            return True
+        if own >= baseline and shot.get("digest") != first.get("digest"):
+            # No new path, but the same paths hold different content, which is
+            # a file rewritten in place. The superset test is what keeps this
+            # from re-admitting the discard cases: throwing dirt away also
+            # changes the digest, and it shrinks the set rather than keeping
+            # it.
+            return True
+    return False
+
+
+def _path_set(snapshot: dict[str, Any]) -> set[str]:
+    recorded = snapshot.get("paths")
+    if not isinstance(recorded, list):
+        return set()
+    return {value for value in recorded if isinstance(value, str)}
 
 
 def session_size(records: list[dict[str, Any]]) -> tuple[int, int]:
     """Return how much one session changed, as a magnitude and never a trigger.
 
-    The maximum across boundaries rather than the difference between the two
-    ends: a session that edits and then commits returns the tree to clean, and
-    the outer pair would size that work at zero. A tree that was already dirty
-    when the session started is not the session's doing, so the first
-    boundary is the baseline rather than absolute counts.
+    Measured against the session's first boundary, because a tree that was
+    already dirty when it started is not its doing, and taken as a maximum
+    across boundaries, because a session that commits its work returns the
+    tree to clean before it ends.
+
+    Counting alone is not enough. A boundary that shares no dirty path with
+    the first one is entirely the session's own doing however the totals
+    compare — ten junk files deleted and one real feature written leaves fewer
+    dirty files than it started with, and netting the counts sized that
+    feature at zero and filtered it out of the report. Where the boundary
+    still holds paths the session inherited, only the increase counts.
     """
 
     distinct = {
@@ -278,22 +341,20 @@ def session_size(records: list[dict[str, Any]]) -> tuple[int, int]:
     if not snapshots:
         return (len(distinct), 0)
     first = snapshots[0]
-    files = max(
-        (
-            worktree.recorded_count(shot.get("files"))
-            - worktree.recorded_count(first.get("files"))
-            for shot in snapshots
-        ),
-        default=0,
-    )
-    lines = max(
-        (
-            worktree.recorded_count(shot.get("lines"))
-            - worktree.recorded_count(first.get("lines"))
-            for shot in snapshots
-        ),
-        default=0,
-    )
+    baseline = _path_set(first)
+    base_files = worktree.recorded_count(first.get("files"))
+    base_lines = worktree.recorded_count(first.get("lines"))
+    files, lines = 0, 0
+    for shot in snapshots:
+        own = _path_set(shot)
+        shot_files = worktree.recorded_count(shot.get("files"))
+        shot_lines = worktree.recorded_count(shot.get("lines"))
+        if own and not (own & baseline) and not shot.get("paths_truncated"):
+            files = max(files, len(own))
+            lines = max(lines, shot_lines)
+        else:
+            files = max(files, shot_files - base_files)
+            lines = max(lines, shot_lines - base_lines)
     return (max(len(distinct), files, 0), max(lines, 0))
 
 

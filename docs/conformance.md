@@ -42,15 +42,23 @@ session stop all behave identically whether the journal is writable or not.
 
 ## The signal
 
-A session changed something when it produced an `edit` record, **or** its
-working-tree digest differs between two consecutive turn boundaries **and** it
-added something — more changed files or lines at some boundary than at its
-first one.
+A session changed something when it produced an `edit` record, **or** some
+boundary holds a dirty path its first boundary did not, **or** the same paths
+hold different content.
 
-The second half of that matters: moving the tree is not the same as adding to
-it. `git checkout -- .`, `git clean` and a hard reset over dirt that was
-already there all change the digest while authoring nothing, and were
-classified as bypasses of zero files and zero lines.
+Moving the tree is not the same as adding to it. `git checkout -- .`,
+`git clean` and a hard reset over dirt that was already there all change the
+digest while authoring nothing.
+
+The comparison is per path, not by counting. Netting the counts made a session
+that removes more than it adds look like it authored nothing: ten junk files
+deleted and one real feature written leaves *fewer* dirty files than it started
+with. Paths are recorded as hashes, capped at `MAX_SNAPSHOT_PATHS`; beyond that
+the snapshot says it was truncated and the coarser count comparison is used.
+
+The content clause has a deliberate guard: it applies only when the path set
+did not shrink. Discarding dirt also changes the digest, and without the guard
+that would be work again.
 
 `HEAD` is recorded and reported as context. **It is never evidence.** A head
 move says something changed and cannot say who changed it or why: authoring,
@@ -86,6 +94,18 @@ A snapshot taken while git has a merge, rebase, cherry-pick, revert or bisect
 open is not evidence, exactly as a degraded one is not: the tree is full of
 content git put there. The session is reported `unobserved`.
 
+Detection uses only markers git **removes when the operation ends** — the
+`rebase-merge` and `rebase-apply` directories, `MERGE_HEAD`,
+`CHERRY_PICK_HEAD`, `REVERT_HEAD` and `BISECT_LOG`. `REBASE_HEAD` is
+deliberately not among them: git 2.50.1 leaves it behind after a *completed*
+rebase, where it survives later commits, a checkout, a merge and a `gc` and is
+cleared only by the next rebase. Treating it as an open operation silenced
+every session in any repository where a rebase conflict had ever been
+resolved — including sessions whose edits were recorded by tool events, which
+no stale file makes unreliable. Git 2.21 removes the file, so a suite running
+only that git could not see the difference; there is now a test that runs the
+whole cycle under a second git when the machine has one.
+
 Aborting the operation does not repair it, and the session is still not judged.
 The size charged is a maximum across boundaries, so a single boundary taken
 during a conflict would otherwise accuse a session that pulled, hit a conflict,
@@ -105,11 +125,15 @@ sessions `read_only` and drops them from the rate's denominator entirely.
 **Edits under an ignored path.** Git never reports them, so no snapshot sees
 them.
 
-**`git stash pop`.** It materialises real content into the tree and leaves no
-marker of its own, so it is indistinguishable from authoring and *is* reported.
-It is the one known false positive.
+**Content that appears without being written.** `git stash pop`, `git apply`,
+`cherry-pick -n`, `git checkout BRANCH -- PATH`, `git worktree add` inside the
+repository, and build output that is not gitignored all put content in the tree
+that nobody typed. None leaves a marker git removes, and no observation of the
+tree alone distinguishes them from authoring, so all of them **are** reported.
+This is the residual false-positive family, and it is the price of keeping the
+shell term at all.
 
-All three fail towards silence except the last. Silence is the direction this
+Everything else here fails towards silence. Silence is the direction this
 module errs in, because a warning that fires on `git pull` is a warning people
 learn to ignore.
 

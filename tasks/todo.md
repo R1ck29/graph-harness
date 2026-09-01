@@ -20,7 +20,73 @@ Executable plan: `task-graph.json` (7 nodes), which is the authority for status.
 
 ## Where `bypass-signal` stands
 
-Two attempts, two independent FAILs, budget exhausted. The same escalation as
+Three attempts, three independent FAILs, budget exhausted again at 3 of 3 after
+the user granted a third. Six review rounds in total on this problem, counting
+the superseded graph.
+
+**Every single failure has been in the working-tree term. The edit-event term
+has never failed a review.** Attempt 3's reviewer states it directly: adding an
+`Edit` event to the failing scenario makes it report correctly, so only the
+shell half is broken.
+
+Attempt 3 did close what it set out to close. `REBASE_HEAD` is gone from the
+operation markers, which now hold only markers git removes when an operation
+ends, and a cross-git test drives a real conflicted rebase to completion under
+the second git on the machine; re-adding `REBASE_HEAD` fails three tests
+including that one, with "silenced under /usr/bin/git". The suite can now see a
+class of defect it previously could not.
+
+It failed on two new holes in the same term:
+
+- **A shrinking path set cancels authored work.** A boundary whose dirty-path
+  set is a strict subset of the first satisfies neither the new-path test nor
+  the same-paths-different-content test. Confirmed here directly: a repository
+  opening with two dirty files, where the session writes 900 lines into one
+  through the shell and commits the other, gives `edited() False` and
+  `session_size() (0, 889)` with `M a.py` on disk. The size term contradicts
+  the detection term inside one module.
+- **The truncation fallback re-admits attempt 2's defect verbatim.** Above
+  `MAX_SNAPSHOT_PATHS` the per-path rule is abandoned for the whole session and
+  the net-count comparison that already failed is used instead, so the fix is
+  gated on how dirty the repository happens to be.
+
+## The pattern, after six rounds
+
+| Round | What the tree term was caught doing |
+| --- | --- |
+| 1 | buried candidates, unclaimed reports, concurrent double-reporting, timestamp collisions, forged heads |
+| 2 | a concurrent claim invisible behind a truncated history |
+| 3 | `git pull` and `git checkout` reported as bypasses |
+| 4 | conflicted pull, `stash pop`, submodule update reported; discards classified `bypass` |
+| 5 | a stale `REBASE_HEAD` silencing every session; net counts hiding real authoring |
+| 6 | a shrinking path set hiding real authoring; the truncation fallback restoring round 5's defect |
+
+Each fix has been correct for the case it addressed and has exposed the next
+one. That is what an underdetermined signal looks like: the working tree
+records *that state changed*, never *who changed it*, and every round has been
+an attempt to recover the missing half by inference.
+
+The remaining recommendation from review is a further increment of the same
+kind — per-path digest samples accumulated across consecutive boundary pairs.
+It would likely pass the two named scenarios and is not obviously the last one.
+
+## Recommendation
+
+Retire this node and re-scope, rather than grant a fourth attempt.
+
+Report bypasses from **edit events only**, which are direct causal evidence
+that this session's agent wrote a file and have passed every review. Demote the
+working-tree comparison to context in `graphctl conformance` — a low-confidence
+hint, never a warning trigger. That removes the entire false-positive family
+and both remaining holes at once, because none of `git pull`, `stash pop`,
+`apply`, a discard, a truncated tree or a concurrent writer produces an edit
+event.
+
+The cost is real and must be documented, not glossed: a session that edits only
+through the shell stops producing a warning. Whether that gap is worth closing
+later is a separate question with a separate answer — a `Bash` `PostToolUse`
+event would give the same causal attribution for shell writes that `Edit` gives
+for tool writes, and it belongs in its own node with its own review. The same escalation as
 before applies: whether to grant a third is the user's decision, not this
 session's.
 
