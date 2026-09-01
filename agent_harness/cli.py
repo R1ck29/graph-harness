@@ -26,7 +26,17 @@ MINIMUM_PYTHON = (3, 10)
 # The commands that move graph state. A session that edits code and runs none
 # of these is the case the journal exists to make visible.
 MUTATING_COMMANDS = frozenset(
-    {"init", "add-node", "start", "submit", "verify", "withdraw", "retry"}
+    {
+        "init",
+        "add-node",
+        "start",
+        "submit",
+        "verify",
+        "withdraw",
+        "retry",
+        "grant-attempt",
+        "supersede",
+    }
 )
 
 # The events only a client hook can produce. Hook liveness is judged from
@@ -205,6 +215,7 @@ def _journal_diagnostics() -> dict[str, Any]:
         "journal_bytes": journal.total_bytes(),
         "journal_months": [path.name for path in journal.month_files()],
         "last_observed": {},
+        "edit_hook_last_seen": {},
         "warnings": [],
     }
     try:
@@ -213,7 +224,19 @@ def _journal_diagnostics() -> dict[str, Any]:
         report["warnings"].append(f"The journal directory is unusable: {exc}")
         return report
     latest: dict[str, str] = {}
+    edits: dict[str, str] = {}
     for entry in journal.read():
+        # The edit hook is the only producer that proves PostToolUse fires.
+        # A client can record boundaries perfectly and still have no edit
+        # hook installed, in which case the shell term is carrying the whole
+        # signal alone and a reader should know it.
+        if entry.get("event") == "edit":
+            client = entry.get("client")
+            stamp = entry.get("ts")
+            if isinstance(client, str) and isinstance(stamp, str):
+                if stamp > edits.get(client, ""):
+                    edits[client] = stamp
+            continue
         # Only a session boundary proves a hook ran. A graph_transition proves
         # that graphctl ran, which a person can do by hand with no hook
         # installed at all, so counting it would report a client as observed
@@ -226,6 +249,15 @@ def _journal_diagnostics() -> dict[str, Any]:
             if stamp > latest.get(client, ""):
                 latest[client] = stamp
     report["last_observed"] = latest
+    report["edit_hook_last_seen"] = edits
+    for client in sorted(latest):
+        if client not in edits:
+            report["warnings"].append(
+                f"No {client} edit has been observed. Its PostToolUse hook may "
+                "not be installed, which leaves the working-tree comparison as "
+                "the only signal and loses every session that commits inside a "
+                "single turn."
+            )
     return report
 
 
@@ -404,6 +436,27 @@ def build_parser() -> argparse.ArgumentParser:
     withdraw.add_argument("node")
     withdraw.add_argument(
         "--actor-id", required=True, help="must match the task executor"
+    )
+
+    grant = commands.add_parser(
+        "grant-attempt",
+        help="record that a person granted one more attempt to a failed task",
+    )
+    grant.add_argument("node")
+    grant.add_argument(
+        "--granted-by",
+        required=True,
+        help="who decided this; an agent must not grant itself an attempt",
+    )
+    grant.add_argument("--reason", required=True, help="why the budget was extended")
+
+    supersede = commands.add_parser(
+        "supersede",
+        help="retire a task whose approach was abandoned, releasing its dependents",
+    )
+    supersede.add_argument("node")
+    supersede.add_argument(
+        "--reason", required=True, help="why this approach was abandoned"
     )
 
     retry = commands.add_parser("retry", help="reset a failed task for a new attempt")
@@ -587,6 +640,30 @@ def run(args: argparse.Namespace) -> Any:
             "next_action": (
                 f"Submit replacement evidence for node {args.node!r} using the "
                 "same executor identity."
+            ),
+        }
+    if args.command == "grant-attempt":
+        ceiling = store.mutate(
+            lambda graph: graph.grant_attempt(
+                args.node, granted_by=args.granted_by, reason=args.reason
+            )
+        )
+        return {
+            "node": args.node,
+            "max_attempts": ceiling,
+            "granted_by": args.granted_by,
+            "next_action": f"retry {args.node}",
+        }
+    if args.command == "supersede":
+        released = store.mutate(
+            lambda graph: graph.supersede(args.node, reason=args.reason)
+        )
+        return {
+            "node": args.node,
+            "status": "superseded",
+            "released": released,
+            "next_action": (
+                f"retry each released task: {', '.join(released)}" if released else None
             ),
         }
     if args.command == "retry":

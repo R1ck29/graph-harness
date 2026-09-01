@@ -32,7 +32,14 @@ MANAGED_BEGIN = "<!-- BEGIN graph-engineering-agent-harness -->"
 MANAGED_END = "<!-- END graph-engineering-agent-harness -->"
 HOOK_MARKER = "graphctl-claude-stop"
 # The hook events this installer manages, in the order it writes them.
-MANAGED_HOOK_EVENTS = ("SessionStart", "Stop", "SessionEnd")
+MANAGED_HOOK_EVENTS = ("SessionStart", "Stop", "SessionEnd", "PostToolUse")
+
+# Events whose entry carries a matcher. Without one the edit hook would run
+# after every tool call, paying its cost on reads and searches, and the
+# producer would record whatever the client happened to be configured with.
+# The producer refuses a tool outside this list as well, so the matcher is a
+# cost control rather than the only filter.
+MANAGED_HOOK_MATCHERS = {"PostToolUse": "Edit|Write|MultiEdit|NotebookEdit"}
 INSTALL_DIRECTORY = Path(".local/share/graph-engineering-agent-harness")
 MANAGED_PATTERN = re.compile(
     rf"(?:\n)?{re.escape(MANAGED_BEGIN)}\n.*?{re.escape(MANAGED_END)}(?:\n)?",
@@ -180,18 +187,20 @@ def _with_managed_hooks(
         configured = hooks.setdefault(event, [])
         if not isinstance(configured, list):
             raise InstallError(f"{path} 'hooks.{event}' must be a JSON array")
-        configured.append(
-            {
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": str(command),
-                        "args": [],
-                        "timeout": 10,
-                    }
-                ]
-            }
-        )
+        entry: dict[str, Any] = {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": str(command),
+                    "args": [],
+                    "timeout": 10,
+                }
+            ]
+        }
+        matcher = MANAGED_HOOK_MATCHERS.get(event)
+        if matcher is not None:
+            entry["matcher"] = matcher
+        configured.append(entry)
     return result
 
 
@@ -243,6 +252,7 @@ def _hook_commands(bin_directory: Path) -> dict[str, Path]:
         "SessionStart": bin_directory / f"graphctl-session-start{suffix}",
         "Stop": bin_directory / f"graphctl-claude-stop{suffix}",
         "SessionEnd": bin_directory / f"graphctl-session-end{suffix}",
+        "PostToolUse": bin_directory / f"graphctl-edit{suffix}",
     }
 
 

@@ -20,6 +20,9 @@ STATUSES = {
     "verified",
     "failed",
     "invalidated",
+    # A node whose approach was abandoned. Not done, not owed: it holds its
+    # failure history and stops blocking work that no longer needs it.
+    "superseded",
 }
 RESULTS = {"pass", "fail", "uncertain"}
 NODE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -383,8 +386,11 @@ class Graph:
     def _validate_runtime_consistency(self) -> None:
         by_id = {node["id"]: node for node in self.nodes}
         for node in self.nodes:
+            # A superseded dependency is settled, not owed. It is the one
+            # status other than verified that lets dependent work proceed,
+            # because its approach was abandoned rather than left undone.
             deps_verified = all(
-                by_id[dependency]["status"] == "verified"
+                by_id[dependency]["status"] in {"verified", "superseded"}
                 for dependency in node["depends_on"]
             )
             if node["status"] == "ready" and not deps_verified:
@@ -821,12 +827,91 @@ class Graph:
         node.pop("submitted_at", None)
         node.pop("verified_at", None)
         deps_verified = all(
-            self.node(dependency)["status"] == "verified"
+            self.node(dependency)["status"] in {"verified", "superseded"}
             for dependency in node["depends_on"]
         )
         node["status"] = "ready" if deps_verified else "blocked"
         self.validate()
         return cast(str, node["status"])
+
+    def grant_attempt(self, node_id: str, granted_by: str, reason: str) -> int:
+        """Record that a person granted one more attempt, and raise the ceiling.
+
+        The protocol says to stop and escalate when the budget runs out. When
+        the answer comes back "take one more", there has to be a way to say so
+        that is not editing the graph by hand, which is the one thing agents
+        are told not to do.
+
+        ``attempts`` is never touched. The failures that spent the budget stay
+        on the record and stay counted, and the grant sits beside them naming
+        whoever gave it. An agent must not call this to unblock itself; it
+        carries a grantor because the grantor is the point.
+        """
+
+        node = self.node(node_id)
+        self._require_non_empty(granted_by, "granted_by")
+        self._require_non_empty(reason, "reason")
+        if node["status"] not in {"failed", "invalidated"}:
+            raise HarnessError(
+                f"only a failed node can be granted an attempt: {node_id} is "
+                f"{node['status']}"
+            )
+        if node["max_attempts"] >= MAX_ATTEMPTS:
+            raise HarnessError(
+                f"node {node_id} is at the absolute attempt ceiling of {MAX_ATTEMPTS}"
+            )
+        node["max_attempts"] += 1
+        node.setdefault("granted_attempts", []).append(
+            {
+                "granted_by": granted_by,
+                "reason": reason,
+                "granted_at": utc_now(),
+                "at_attempts": node["attempts"],
+            }
+        )
+        self.validate()
+        return cast(int, node["max_attempts"])
+
+    def supersede(self, node_id: str, reason: str) -> list[str]:
+        """Retire a node whose approach was abandoned, releasing its dependents.
+
+        Without this, changing approach means rebuilding the whole graph, and a
+        rebuild silently resets every attempt budget in it — the exact
+        laundering the budget exists to prevent. Retiring one node leaves every
+        other verdict, and this node's own failure history, where they are.
+
+        A verified node cannot be superseded: retiring finished work would make
+        the record say less than it truthfully can.
+
+        Descendants are released, not restarted. An invalidated descendant
+        still needs its own explicit ``retry``, because the protocol has one
+        rule about discarded work — that somebody consciously picks it up
+        again — and an escape hatch is not a reason to make an exception to it.
+        What changes is that ``retry`` now accepts them, because their
+        dependency is settled. The returned list names exactly those.
+        """
+
+        node = self.node(node_id)
+        self._require_non_empty(reason, "reason")
+        if node["status"] == "verified":
+            raise HarnessError(f"cannot supersede a verified node: {node_id}")
+        if node["status"] == "superseded":
+            raise HarnessError(f"node {node_id} is already superseded")
+        node["status"] = "superseded"
+        node["superseded_reason"] = reason
+        node["superseded_at"] = utc_now()
+        self._promote_blocked_nodes()
+        released = [
+            descendant
+            for descendant in self.descendants(node_id)
+            if self.node(descendant)["status"] in {"ready", "blocked", "invalidated"}
+            and all(
+                self.node(dependency)["status"] in {"verified", "superseded"}
+                for dependency in self.node(descendant)["depends_on"]
+            )
+        ]
+        self.validate()
+        return released
 
     def review_packet(self, node_id: str) -> dict[str, Any]:
         node = self.node(node_id)
@@ -876,7 +961,11 @@ class Graph:
         return upstream
 
     def completion_check(self) -> None:
-        incomplete = [node["id"] for node in self.nodes if node["status"] != "verified"]
+        incomplete = [
+            node["id"]
+            for node in self.nodes
+            if node["status"] not in {"verified", "superseded"}
+        ]
         if incomplete:
             raise HarnessError(f"graph is not complete; unverified nodes: {incomplete}")
 
@@ -888,7 +977,12 @@ class Graph:
             "objective": self.document["objective"],
             "counts": counts,
             "ready": self.ready_nodes(),
-            "complete": counts["verified"] == len(self.nodes),
+            # Named rather than folded into the verified count: a reader must
+            # be able to see that a node was retired, not finished.
+            "superseded": [
+                node["id"] for node in self.nodes if node["status"] == "superseded"
+            ],
+            "complete": counts["verified"] + counts["superseded"] == len(self.nodes),
             "nodes": [
                 {
                     "id": node["id"],
@@ -929,7 +1023,11 @@ class Graph:
             return f"verify {node_id} with an independent reviewer"
         if status in {"failed", "invalidated"}:
             if node["attempts"] >= node["max_attempts"]:
-                return "manual intervention required; max_attempts reached"
+                return (
+                    "budget exhausted; escalate to a person, who may record a "
+                    f"decision with 'grant-attempt {node_id}' or "
+                    f"'supersede {node_id}'"
+                )
             return f"retry {node_id}"
         return None
 
@@ -998,7 +1096,7 @@ class Graph:
             if node["status"] != "blocked":
                 continue
             if all(
-                self.node(dependency)["status"] == "verified"
+                self.node(dependency)["status"] in {"verified", "superseded"}
                 for dependency in node["depends_on"]
             ):
                 node["status"] = "ready"

@@ -285,6 +285,41 @@ class DoctorDiagnosticsTests(unittest.TestCase):
         self.assertIn("No claude session has been observed", warnings)
         self.assertIn("No codex session has been observed", warnings)
 
+    def test_edit_hook_liveness_is_reported_separately_from_boundaries(
+        self,
+    ) -> None:
+        # A client can record boundaries perfectly and have no PostToolUse
+        # hook at all, which leaves the working-tree comparison carrying the
+        # signal alone. Reporting only session liveness would call that
+        # installation healthy.
+        journal.append(
+            journal.record("session_open", client="claude", session_id="s1"), self.home
+        )
+
+        report = self._diagnose()
+
+        self.assertIn("claude", report["last_observed"])
+        self.assertEqual({}, report["edit_hook_last_seen"])
+        self.assertIn("No claude edit has been observed", " ".join(report["warnings"]))
+
+    def test_an_observed_edit_clears_the_edit_hook_warning(self) -> None:
+        journal.append(
+            journal.record("session_open", client="claude", session_id="s1"), self.home
+        )
+        journal.append(
+            journal.record(
+                "edit", client="claude", session_id="s1", tool="Edit", path_id="a" * 12
+            ),
+            self.home,
+        )
+
+        report = self._diagnose()
+
+        self.assertIn("claude", report["edit_hook_last_seen"])
+        self.assertNotIn(
+            "No claude edit has been observed", " ".join(report["warnings"])
+        )
+
     def test_a_runtime_below_the_supported_floor_is_warned_about(self) -> None:
         self._install_runtime("3.8.5")
 
@@ -559,3 +594,87 @@ class CodexSessionReaderTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EscapeHatchTransitionTests(unittest.TestCase):
+    """The two escape hatches must be as visible as the failures they follow."""
+
+    def setUp(self) -> None:
+        self._home = tempfile.TemporaryDirectory()
+        self.addCleanup(self._home.cleanup)
+        self._workspace = tempfile.TemporaryDirectory(dir=REPOSITORY)
+        self.addCleanup(self._workspace.cleanup)
+        self.home = Path(self._home.name)
+        self.workspace = Path(self._workspace.name)
+        self._environment = mock.patch.dict(
+            os.environ, {"GRAPH_HARNESS_HOME": str(self.home)}
+        )
+        self._environment.start()
+        self.addCleanup(self._environment.stop)
+
+    def _run(self, *arguments: str) -> int:
+        previous = os.getcwd()
+        os.chdir(self.workspace)
+        try:
+            return cli.main(list(arguments))
+        finally:
+            os.chdir(previous)
+
+    def _commands(self) -> list[str]:
+        return [
+            str(entry.get("command"))
+            for entry in journal.read(self.home)
+            if entry.get("event") == "graph_transition"
+        ]
+
+    def _exhaust(self) -> None:
+        self._run("init", "--objective", "o", "--criterion", "c", "--node", "task")
+        for _ in range(2):
+            self._run("start", "task", "--executor-id", "e1")
+            self._run("submit", "task", "--actor-id", "e1", "--evidence", "tried")
+            self._run(
+                "verify",
+                "task",
+                "--fail",
+                "--reviewer-id",
+                "r1",
+                "--reason",
+                "not yet",
+                "--failed-criterion",
+                "c",
+                "--evidence",
+                "reviewer reran",
+            )
+            if self._run("retry", "task") != 0:
+                break
+
+    def test_a_granted_attempt_is_recorded_as_a_transition(self) -> None:
+        self._exhaust()
+
+        outcome = self._run(
+            "grant-attempt",
+            "task",
+            "--granted-by",
+            "rick",
+            "--reason",
+            "design changed",
+        )
+
+        self.assertEqual(0, outcome)
+        self.assertIn("grant-attempt", self._commands())
+        self.assertEqual(0, self._run("retry", "task"))
+
+    def test_a_grant_without_a_grantor_is_refused_by_the_parser(self) -> None:
+        self._exhaust()
+
+        with self.assertRaises(SystemExit):
+            self._run("grant-attempt", "task", "--reason", "design changed")
+
+    def test_superseding_is_recorded_as_a_transition(self) -> None:
+        self._exhaust()
+
+        outcome = self._run("supersede", "task", "--reason", "approach abandoned")
+
+        self.assertEqual(0, outcome)
+        self.assertIn("supersede", self._commands())
+        self.assertEqual(0, self._run("completion-check"))

@@ -26,6 +26,14 @@ against. `review-packet` therefore names each verified ancestor's reviewed files
 as `upstream_verified_files`; a regression there is reported with
 `verify --fail --faulty-node ANCESTOR`.
 
+When `max_attempts` is reached, stop and escalate. If a person decides to grant
+another attempt or to retire the approach, record that decision with
+`graphctl grant-attempt NODE --granted-by WHO --reason TEXT` or
+`graphctl supersede NODE --reason TEXT`. Neither may be run by an agent to
+unblock itself: both exist so a human decision is recorded rather than a graph
+edited by hand or rebuilt, and rebuilding a graph to refresh a budget is the
+thing the budget exists to prevent.
+
 Agents must not edit status, attempts, verification, or failure history directly.
 Canonical graph files are JSON. JSON is a YAML 1.2 subset, but v1 intentionally
 does not include a general YAML parser.

@@ -43,6 +43,7 @@ class PcInstallContractTests(unittest.TestCase):
         self.stop_guard = self._fake_executable(f"graphctl-claude-stop{suffix}")
         self.session_start = self._fake_executable(f"graphctl-session-start{suffix}")
         self.session_end = self._fake_executable(f"graphctl-session-end{suffix}")
+        self.edit_hook = self._fake_executable(f"graphctl-edit{suffix}")
 
     def _fake_executable(self, name: str) -> Path:
         executable = self.runtime_bin / name
@@ -132,6 +133,7 @@ class PcInstallContractTests(unittest.TestCase):
                         "graphctl-claude-stop",
                         "graphctl-session-start",
                         "graphctl-session-end",
+                        "graphctl-edit",
                     }:
                         managed.setdefault(event, []).append(command)
         return managed
@@ -142,13 +144,75 @@ class PcInstallContractTests(unittest.TestCase):
         for document in (self._settings(), self._codex_hooks()):
             managed = self._managed_events(document)
             self.assertEqual(
-                {"SessionStart", "Stop", "SessionEnd"},
+                {"SessionStart", "Stop", "SessionEnd", "PostToolUse"},
                 set(managed),
                 document,
             )
             self.assertEqual([str(self.session_start)], managed["SessionStart"])
             self.assertEqual([str(self.stop_guard)], managed["Stop"])
             self.assertEqual([str(self.session_end)], managed["SessionEnd"])
+            self.assertEqual([str(self.edit_hook)], managed["PostToolUse"])
+
+    def test_the_edit_hook_carries_the_matcher_that_selects_editing_tools(
+        self,
+    ) -> None:
+        # Without a matcher the hook would run after every tool call, and the
+        # producer would pay its cost on reads and searches too.
+        self._install()
+
+        for document in (self._settings(), self._codex_hooks()):
+            entries = [
+                matcher
+                for matcher in document["hooks"]["PostToolUse"]
+                if str(self.edit_hook) in json.dumps(matcher)
+            ]
+            self.assertEqual(1, len(entries), document)
+            self.assertEqual(
+                "Edit|Write|MultiEdit|NotebookEdit", entries[0].get("matcher")
+            )
+
+    def test_an_unrelated_claude_post_tool_use_entry_survives(self) -> None:
+        # This event was unmanaged until now, and a real machine already has a
+        # third-party entry on it.
+        self.claude.mkdir(parents=True, exist_ok=True)
+        original = {
+            "hooks": {
+                "PostToolUse": [
+                    {
+                        "matcher": "Edit|Write",
+                        "hooks": [{"type": "command", "command": "someone-elses-tool"}],
+                    }
+                ]
+            }
+        }
+        (self.claude / "settings.json").write_text(
+            json.dumps(original, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+
+        self._install()
+
+        installed = self._settings()
+        self.assertIn(
+            original["hooks"]["PostToolUse"][0], installed["hooks"]["PostToolUse"]
+        )
+
+        self._run("--uninstall")
+
+        self.assertEqual(original, self._settings())
+
+    def test_check_reports_drift_for_a_removed_edit_hook(self) -> None:
+        self._install()
+        document = self._settings()
+        document["hooks"].pop("PostToolUse")
+        (self.claude / "settings.json").write_text(
+            json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+
+        drifted = self._run("--check")
+
+        self.assertEqual(2, drifted.returncode)
+        self.assertIn("hook drift", drifted.stderr)
+        self.assertEqual(document, self._settings())
 
     def test_a_repeated_install_adds_no_second_entry_to_any_event(self) -> None:
         self._install()
@@ -186,8 +250,10 @@ class PcInstallContractTests(unittest.TestCase):
 
         self._install()
         installed = self._codex_hooks()
-        self.assertEqual(
-            original["hooks"]["PostToolUse"], installed["hooks"]["PostToolUse"]
+        # PostToolUse is a managed event now, so the third-party entry is kept
+        # beside ours rather than being the only one.
+        self.assertIn(
+            original["hooks"]["PostToolUse"][0], installed["hooks"]["PostToolUse"]
         )
         self.assertIn(original["hooks"]["Stop"][0], installed["hooks"]["Stop"])
 
@@ -497,6 +563,7 @@ class PcInstallContractTests(unittest.TestCase):
             "graphctl-claude-stop",
             "graphctl-session-start",
             "graphctl-session-end",
+            "graphctl-edit",
         ):
             executable = runtime_bin / name
             executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
