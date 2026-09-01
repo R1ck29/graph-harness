@@ -6,12 +6,13 @@ worth catching. Comparing the working tree before and after is independent of
 how the edit was made, and is one of the two terms the signal rests on; the
 other is an edit event, which says which session's agent did the writing.
 
-``HEAD`` is recorded but never compared. A head move says something changed and
-cannot say who changed it or why: authoring, pulling, checking out, rebasing
-and a colleague's commit in another terminal are one observation. Judging on it
-reported anyone who ran ``git pull`` as having bypassed the protocol. What a
-commit of the session's own work leaves behind is caught instead by comparing
-consecutive turn boundaries, one of which saw the tree dirty.
+**Nothing here decides anything any more.** A snapshot says a tree changed and
+can never say who changed it: authoring, pulling, checking out, rebasing,
+popping a stash, updating a submodule and a colleague's commit in another
+terminal are one observation. Six rounds of review found six different commands
+that move a tree with nobody authoring anything, and each fix for one exposed
+the next. Whether a session wrote code is answered by its edit records; what is
+here is context a person reads beside that answer.
 """
 
 from __future__ import annotations
@@ -34,33 +35,6 @@ SNAPSHOT_BUDGET_SECONDS = 4.0
 # visible; the status line alone would not change. Large files are represented
 # by their size, which keeps a session that drops a build artifact cheap.
 MAX_UNTRACKED_BYTES = 1_048_576
-
-# Markers git leaves in its own directory while an operation it could not
-# finish is still open. A conflicted merge, rebase, cherry-pick or revert
-# fills the tree with content nobody authored, so a snapshot taken while one
-# is open is not evidence of anything a session did.
-#
-# Every entry here is one git removes when the operation ends. REBASE_HEAD is
-# deliberately absent: git 2.50.1 leaves it behind after a completed rebase,
-# where it survives later commits, a checkout, a merge and a gc and is cleared
-# only by the next rebase. Treating it as an open operation made every session
-# in such a repository silently unobserved, including sessions whose edits
-# were recorded by tool events, which no stale file makes unreliable.
-OPERATION_MARKERS = (
-    "MERGE_HEAD",
-    "CHERRY_PICK_HEAD",
-    "REVERT_HEAD",
-    "BISECT_LOG",
-    "rebase-merge",
-    "rebase-apply",
-)
-
-# How many dirty paths a snapshot names, as hashes. The set is what
-# distinguishes work a session added from dirt it threw away; the bound keeps
-# one record inside MAX_JOURNAL_LINE_BYTES. Beyond it the snapshot says so and
-# the coarser count comparison is used instead.
-MAX_SNAPSHOT_PATHS = 80
-SNAPSHOT_PATH_CHARACTERS = 8
 
 # Hashed in place of a diff git could not produce, so an unborn HEAD or a
 # timed-out call is visible in the digest instead of reading as an empty diff.
@@ -138,30 +112,6 @@ def _changed_lines(shortstat: str) -> int:
     return total
 
 
-def _operation(repo: Path, git_directory: str | None) -> str | None:
-    """Name the git operation still open in *repo*, if there is one.
-
-    A conflicted merge, rebase, cherry-pick or revert fills the working tree
-    with content nobody authored, and aborting it afterwards does not undo the
-    observation: the size a session is charged is a maximum across its
-    boundaries, so one boundary taken mid-conflict accuses a session whose net
-    effect on the repository was nothing at all.
-    """
-
-    if git_directory is None:
-        return None
-    root = Path(git_directory.strip())
-    if not root.is_absolute():
-        root = repo / root
-    for marker in OPERATION_MARKERS:
-        try:
-            if (root / marker).exists():
-                return marker
-        except OSError:
-            return None
-    return None
-
-
 def snapshot(directory: str | os.PathLike[str]) -> dict[str, Any]:
     """Return a comparable description of the working tree at *directory*.
 
@@ -180,9 +130,6 @@ def snapshot(directory: str | os.PathLike[str]) -> dict[str, Any]:
         return {
             "git": False,
             "head": None,
-            "operation": None,
-            "paths": [],
-            "paths_truncated": False,
             "digest": None,
             "files": 0,
             "lines": 0,
@@ -204,15 +151,6 @@ def snapshot(directory: str | os.PathLike[str]) -> dict[str, Any]:
     if status is None:
         return absent()
     entries = _status_entries(status)
-    # Hashed for the same reason edit records hash theirs: a filename can name
-    # a customer, and this file must never carry one.
-    dirty = sorted(
-        hashlib.sha256(path.encode("utf-8", "replace")).hexdigest()[
-            :SNAPSHOT_PATH_CHARACTERS
-        ]
-        for _, path in entries
-    )
-    truncated = len(dirty) > MAX_SNAPSHOT_PATHS
     digest = hashlib.sha256()
     digest.update("\n".join(f"{code} {path}" for code, path in entries).encode("utf-8"))
     degraded = False
@@ -251,8 +189,6 @@ def snapshot(directory: str | os.PathLike[str]) -> dict[str, Any]:
                 )
         except OSError:
             digest.update(b"?")
-    git_directory = _git(repo, "rev-parse", "--git-dir", deadline=deadline)
-    operation = _operation(repo, git_directory)
     rendered_head = _git(repo, "rev-parse", "HEAD", deadline=deadline)
     head = (rendered_head or "").strip() or None
     lines = created
@@ -267,9 +203,6 @@ def snapshot(directory: str | os.PathLike[str]) -> dict[str, Any]:
     return {
         "git": True,
         "head": head,
-        "operation": operation,
-        "paths": dirty[:MAX_SNAPSHOT_PATHS],
-        "paths_truncated": truncated,
         "digest": digest.hexdigest(),
         "files": len(entries),
         "lines": lines,

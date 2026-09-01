@@ -78,9 +78,20 @@ starts, ends, or finishes a turn, a small program records four things:
 - a fingerprint of the project's files at that moment,
 - nothing else. No code, no conversation, no file contents.
 
-Comparing the fingerprint at the start against the one at the end says whether
-anything changed. Comparing that against whether the plan file was touched says
-whether the change went through the process.
+There is also a record every time the assistant uses an editing tool: which
+session, and a *hash* of which file — never the filename itself, because a
+filename can name a customer.
+
+That last record is the one that matters, and it took six rounds of review to
+learn why. Comparing fingerprints tells you a project changed; it cannot tell
+you *who* changed it. Every attempt to guess the missing half accused somebody
+who had merely run `git pull`, or `git stash pop`, or updated a submodule. So
+the judgement now rests only on the record of the assistant actually writing a
+file, and the fingerprints are kept as context for a person to read.
+
+The honest cost: if the assistant edits by running shell commands instead of
+using its editing tools, nothing records it, and the session is reported as
+`unattributed` — "nobody can say" — rather than as a clean one.
 
 ### What you can ask it
 
@@ -94,7 +105,7 @@ This prints one line of judgement per session:
 | --- | --- |
 | `conformant` | The session changed code and used the process. |
 | `bypass` | The session changed code and did not use the process. |
-| `read_only` | The session changed nothing. A question, not work. |
+| `unattributed` | Nothing recorded says who changed what. A question, or shell-only work. |
 | `incomplete` | The session was interrupted before it finished. |
 | `unobserved` | Something prevented a reliable observation. |
 | `bypass_suspected` | The session ran, but its work could not be observed. |

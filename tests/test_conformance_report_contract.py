@@ -40,6 +40,7 @@ class ConformanceReportTests(unittest.TestCase):
         before: dict[str, Any] | None = None,
         after: dict[str, Any] | None = None,
         transitions: int = 0,
+        edits: int = 0,
         close: bool = True,
         open_it: bool = True,
     ) -> None:
@@ -50,6 +51,15 @@ class ConformanceReportTests(unittest.TestCase):
                 session_id=session_id,
                 repo=repo,
                 snapshot=before if before is not None else self._snapshot("same"),
+            )
+        for index in range(edits):
+            self._append(
+                "edit",
+                client="claude",
+                session_id=session_id,
+                repo=repo,
+                tool="Edit",
+                path_id=f"{index:012x}",
             )
         for index in range(transitions):
             self._append(
@@ -78,15 +88,17 @@ class ConformanceReportTests(unittest.TestCase):
         self._session(
             "conformant",
             before=self._snapshot("before"),
-            after=self._snapshot("after", files=3, lines=40),
+            after=self._snapshot("after"),
+            edits=3,
             transitions=1,
         )
         self._session(
             "bypass",
             before=self._snapshot("before"),
-            after=self._snapshot("after", files=3, lines=40),
+            after=self._snapshot("after"),
+            edits=3,
         )
-        self._session("read_only")
+        self._session("unattributed")
         self._session("incomplete", close=False)
         self._append(
             "session_close",
@@ -102,7 +114,7 @@ class ConformanceReportTests(unittest.TestCase):
             {
                 "conformant": "conformant",
                 "bypass": "bypass",
-                "read_only": "read_only",
+                "unattributed": "unattributed",
                 "incomplete": "incomplete",
                 "unobserved": "unobserved",
             },
@@ -111,17 +123,23 @@ class ConformanceReportTests(unittest.TestCase):
         self.assertEqual(2, report["judged_sessions"])
         self.assertEqual(0.5, report["conformance_rate"])
 
-    def test_a_degraded_observation_is_reported_as_unobserved(self) -> None:
+    def test_a_degraded_snapshot_no_longer_changes_any_verdict(self) -> None:
+        # This asserted `unobserved` while the tree decided things: a snapshot
+        # that failed could not be compared, so nothing could be concluded.
+        # Nothing is concluded from a snapshot now, so a failed one is simply
+        # not consulted and the edit records still answer the question. A
+        # degraded observation used to be able to hide a real bypass.
         self._session(
             "degraded",
             before={**self._snapshot("before"), "degraded": True},
-            after=self._snapshot("after", files=3, lines=40),
+            after={**self._snapshot("after"), "degraded": True},
+            edits=3,
         )
 
-        self.assertEqual({"degraded": "unobserved"}, self._verdicts(self._report()))
+        self.assertEqual({"degraded": "bypass"}, self._verdicts(self._report()))
 
     def test_a_rate_counts_only_sessions_that_could_be_judged(self) -> None:
-        self._session("read_only")
+        self._session("unattributed")
         self._session("incomplete", close=False)
 
         report = self._report()
@@ -140,7 +158,8 @@ class ConformanceReportTests(unittest.TestCase):
         self._session(
             "second",
             before=self._snapshot("before"),
-            after=self._snapshot("after", files=3, lines=40),
+            after=self._snapshot("after"),
+            edits=3,
         )
         self._append(
             "session_close",
@@ -162,13 +181,15 @@ class ConformanceReportTests(unittest.TestCase):
             "here",
             repo="/one",
             before=self._snapshot("before"),
-            after=self._snapshot("after", files=3, lines=40),
+            after=self._snapshot("after"),
+            edits=3,
         )
         self._session(
             "there",
             repo="/two",
             before=self._snapshot("before"),
-            after=self._snapshot("after", files=3, lines=40),
+            after=self._snapshot("after"),
+            edits=3,
         )
 
         for item in self._report()["sessions"]:
@@ -185,7 +206,8 @@ class ConformanceReportTests(unittest.TestCase):
         self._session(
             "bypass",
             before=self._snapshot("before"),
-            after=self._snapshot("after", files=3, lines=40),
+            after=self._snapshot("after"),
+            edits=3,
         )
 
         self.assertEqual({"bypass": "bypass"}, self._verdicts(self._report()))
@@ -199,7 +221,8 @@ class ConformanceReportTests(unittest.TestCase):
         self._session(
             "worker",
             before=self._snapshot("before"),
-            after=self._snapshot("after", files=5, lines=60),
+            after=self._snapshot("after"),
+            edits=5,
         )
         self._append(
             "graph_transition",
@@ -211,16 +234,18 @@ class ConformanceReportTests(unittest.TestCase):
 
         self.assertEqual({"worker": "conformant"}, self._verdicts(self._report()))
 
-    def test_change_size_is_reported_and_min_files_filters_on_it(self) -> None:
+    def test_edit_counts_are_reported_and_min_files_filters_on_them(self) -> None:
         self._session(
             "small",
             before=self._snapshot("before"),
-            after=self._snapshot("after", files=1, lines=1),
+            after=self._snapshot("after"),
+            edits=1,
         )
         self._session(
             "large",
             before=self._snapshot("before"),
-            after=self._snapshot("after", files=6, lines=90),
+            after=self._snapshot("after"),
+            edits=6,
         )
 
         full = self._report()
@@ -268,13 +293,14 @@ class ConformanceReportTests(unittest.TestCase):
         (codex / "state_1.sqlite").write_text("not a database", encoding="utf-8")
         self._session("here")
 
-        self.assertEqual({"here": "read_only"}, self._verdicts(self._report()))
+        self.assertEqual({"here": "unattributed"}, self._verdicts(self._report()))
 
     def test_the_report_writes_nothing(self) -> None:
         self._session(
             "bypass",
             before=self._snapshot("before"),
-            after=self._snapshot("after", files=3, lines=40),
+            after=self._snapshot("after"),
+            edits=3,
         )
         before = {
             path: path.read_bytes()
@@ -295,7 +321,8 @@ class ConformanceReportTests(unittest.TestCase):
         self._session(
             "bypass",
             before=self._snapshot("before"),
-            after=self._snapshot("after", files=3, lines=40),
+            after=self._snapshot("after"),
+            edits=3,
         )
         environment = dict(os.environ)
         environment["GRAPH_HARNESS_HOME"] = self.home

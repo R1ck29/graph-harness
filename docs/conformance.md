@@ -42,100 +42,50 @@ session stop all behave identically whether the journal is writable or not.
 
 ## The signal
 
-A session changed something when it produced an `edit` record, **or** some
-boundary holds a dirty path its first boundary did not, **or** the same paths
-hold different content.
+A session changed code when it produced an **`edit` record**. That is the whole
+rule.
 
-Moving the tree is not the same as adding to it. `git checkout -- .`,
-`git clean` and a hard reset over dirt that was already there all change the
-digest while authoring nothing.
+An edit record names the session whose agent invoked an editing tool. Nothing
+else here can name anybody: a working-tree comparison says a tree moved and can
+never say who moved it. Six rounds of independent review were spent trying to
+recover the missing half by inference, and each round found another git command
+that moves a tree with nobody authoring anything — `git pull`, a conflicted
+merge, `git stash pop`, a submodule update, `git apply`, discarding dirt — and
+each fix for one exposed the next. The inference is gone.
 
-The comparison is per path, not by counting. Netting the counts made a session
-that removes more than it adds look like it authored nothing: ten junk files
-deleted and one real feature written leaves *fewer* dirty files than it started
-with. Paths are recorded as hashes, capped at `MAX_SNAPSHOT_PATHS`; beyond that
-the snapshot says it was truncated and the coarser count comparison is used.
+The working tree is still snapshotted and still reported, as context beside the
+verdict: `tree_changed`, `tree_files` and `tree_lines`. **No verdict and no
+warning depends on any of them**, and a test asserts that by recomputing every
+verdict with the snapshots stripped out and comparing.
 
-The content clause has a deliberate guard: it applies only when the path set
-did not shrink. Discarding dirt also changes the digest, and without the guard
-that would be work again.
-
-`HEAD` is recorded and reported as context. **It is never evidence.** A head
-move says something changed and cannot say who changed it or why: authoring,
-pulling, checking out, rebasing, resetting and a colleague's commit in another
-terminal are one observation. Judging on it reported anyone who ran `git pull`
-as having bypassed the protocol.
-
-Work the session committed itself is still seen, because the comparison runs
-over every boundary rather than over the outer pair, and one of those
-boundaries saw the tree dirty.
-
-The digest covers the porcelain status, the staged and unstaged diffs, and the
-contents of untracked files up to `MAX_UNTRACKED_BYTES`. Submodules are
-excluded with `--ignore-submodules=all`: a submodule update moves a pointer
-git maintains, and nobody authored anything in this repository. Lines in
-created files are counted while their bytes are read for the digest, because
-untracked content never reaches `git diff` and a session that wrote ten
-thousand new lines was otherwise announced as changing none. Status is read in its
-NUL-separated form, because git's default `core.quotepath` escapes any path
-holding non-ASCII bytes and a parser reading the newline form resolves an
-escape string that names no file — which made edits to files with Japanese
+The snapshot digest covers the porcelain status, the staged and unstaged diffs,
+and the contents of untracked files up to `MAX_UNTRACKED_BYTES`. Status is read
+in its NUL-separated form, because git's default `core.quotepath` escapes any
+path holding non-ASCII bytes and a parser reading the newline form resolves an
+escape string that names no file — which once made edits to files with Japanese
 names invisible.
 
-The two terms cover each other. An edit event names the session whose agent did
-the writing, which no comparison of a shared working tree can do. The digest
-covers changes made through the shell — `sed`, a heredoc, a script — which is
-exactly how a session that ignores the protocol is likely to work, and which no
-count of a client's tool calls would see.
+Size is counted from edit records too — distinct files, and the number of
+editing tool calls — so nothing a git command does to the tree can push a
+session over `WARN_MIN_FILES` or `WARN_MIN_EDITS`.
 
-## Not judgeable
+## What this costs
 
-A snapshot taken while git has a merge, rebase, cherry-pick, revert or bisect
-open is not evidence, exactly as a degraded one is not: the tree is full of
-content git put there. The session is reported `unobserved`.
+**A session that edits only through the shell is not reported.** `sed`, a
+heredoc, a script: none produces an edit record, so none can be attributed.
 
-Detection uses only markers git **removes when the operation ends** — the
-`rebase-merge` and `rebase-apply` directories, `MERGE_HEAD`,
-`CHERRY_PICK_HEAD`, `REVERT_HEAD` and `BISECT_LOG`. `REBASE_HEAD` is
-deliberately not among them: git 2.50.1 leaves it behind after a *completed*
-rebase, where it survives later commits, a checkout, a merge and a `gc` and is
-cleared only by the next rebase. Treating it as an open operation silenced
-every session in any repository where a rebase conflict had ever been
-resolved — including sessions whose edits were recorded by tool events, which
-no stale file makes unreliable. Git 2.21 removes the file, so a suite running
-only that git could not see the difference; there is now a test that runs the
-whole cycle under a second git when the machine has one.
+Such a session is recorded as `unattributed` rather than `read_only`. The
+distinction is the point. `read_only` claims the session changed nothing;
+`unattributed` says only that nothing here can say who changed what, which is
+the truth. Sessions recorded before the edit hook existed read as
+`unattributed` for the same reason, and `graphctl doctor` reports
+`edit_hook_last_seen` so a client with no edit hook installed is visible rather
+than silently unattributed.
 
-Aborting the operation does not repair it, and the session is still not judged.
-The size charged is a maximum across boundaries, so a single boundary taken
-during a conflict would otherwise accuse a session that pulled, hit a conflict,
-ran `git merge --abort`, and left the repository byte-for-byte as it found it.
-
-## What this cannot see
-
-Three gaps, stated because a reader who believes there are none will trust a
-number that has not earned it. Each is pinned by a test.
-
-**Work committed with no turn boundary in between.** A shell edit committed
-inside a single turn leaves every snapshot clean and produces no edit event.
-This is not narrow: committing before *every* turn boundary hides a whole
-session's work the same way, and `graphctl conformance` then classifies those
-sessions `read_only` and drops them from the rate's denominator entirely.
-
-**Edits under an ignored path.** Git never reports them, so no snapshot sees
-them.
-
-**Content that appears without being written.** `git stash pop`, `git apply`,
-`cherry-pick -n`, `git checkout BRANCH -- PATH`, `git worktree add` inside the
-repository, and build output that is not gitignored all put content in the tree
-that nobody typed. None leaves a marker git removes, and no observation of the
-tree alone distinguishes them from authoring, so all of them **are** reported.
-This is the residual false-positive family, and it is the price of keeping the
-shell term at all.
-
-Everything else here fails towards silence. Silence is the direction this
-module errs in, because a warning that fires on `git pull` is a warning people
-learn to ignore.
+The remedy, if this gap is worth closing, is another direct signal rather than
+another inference: a `Bash` `PostToolUse` event would say that this session's
+agent ran a shell command, which is the same kind of evidence `Edit` gives.
+That is not built here.
 
 ## Repository identity
 
@@ -158,37 +108,27 @@ one directory.
 
 | Verdict | Condition |
 | --- | --- |
-| `conformant` | changed, and a `graphctl` run fell inside its window |
-| `bypass` | changed, and none did |
-| `read_only` | no edit event, and nothing added to the tree; excluded from the rate |
+| `conformant` | produced edit records, and a `graphctl` run fell inside its window |
+| `bypass` | produced edit records, and none did |
+| `unattributed` | no edit records, so nothing says who changed what; excluded from the rate |
 | `incomplete` | opened, never ended |
-| `unobserved` | no opening record, an observation that degraded, or a boundary taken while git had an operation open |
-| `bypass_suspected` | a Codex session, whose working tree cannot be observed |
+| `unobserved` | no opening record |
+| `bypass_suspected` | a Codex session, which runs no hooks at all |
 
 Each verdict carries `confidence`, `contested` when another session in the same
-repository overlapped it, and `changed_files` / `changed_lines`. The rate counts
-only `conformant` and `bypass`: a session that changed nothing says nothing
-about whether the protocol was followed.
+repository overlapped it, `changed_files` and `edits`, and the tree context. The
+rate counts only `conformant` and `bypass`: a session nothing can attribute says
+nothing about whether the protocol was followed.
 
-Size is a magnitude, never the reason for reporting. It is the number of
-distinct `path_id` values a session recorded, and the largest difference in
-changed files and lines between any boundary and the session's first one. The
-first boundary is the baseline because a tree that was already dirty when a
-session started is not that session's doing, and the maximum is taken because a
-session that commits its work returns the tree to clean before it ends.
+`changed_files` is the number of distinct `path_id` values the session recorded
+and `edits` is how many editing tool calls it made. Both come from edit records
+alone, so committing the work afterwards, or a dirty tree inherited from
+before, cannot move either number.
 
-A session whose work was committed with no turn boundary in between is reported
-with a line count of zero: the file count comes from its edit records, and no
-snapshot ever saw the tree dirty.
-
-A tree that someone outside the harness dirties while a session is open is
-charged to that session. `contested` marks only overlaps between sessions this
-harness observed, so a person editing in another window is invisible to it.
-
-No recorded `HEAD` is passed to git as an argument any more, because no
-recorded `HEAD` is used at all. The journal is forgeable by anyone who can
-write the user's home, and not consuming a forgeable value is a stronger
-guarantee than validating it.
+No recorded `HEAD` is passed to git as an argument, because no recorded `HEAD`
+is used at all. The journal is forgeable by anyone who can write the user's
+home, and not consuming a forgeable value is a stronger guarantee than
+validating it.
 
 ## Attribution
 
@@ -210,9 +150,11 @@ code is ignored, and it does not run at all when the process is killed.
 
 Three rules keep the report worth reading:
 
-- Only changes of at least `WARN_MIN_FILES` files or `WARN_MIN_LINES` lines are
-  mentioned. Everything is recorded; a harness that objects to a one-line fix
-  teaches people to ignore it.
+- Only sessions that edited at least `WARN_MIN_FILES` distinct files, or made
+  at least `WARN_MIN_EDITS` editing tool calls, are mentioned. Everything is
+  recorded; a harness that objects to a one-line fix teaches people to ignore
+  it. Both counts come from edit records, so nothing a git command did to the
+  tree can push a session over either.
 - A report is recorded as made, and never repeated. Deciding that from
   timestamps was tried and failed in three separate ways.
 - The scan walks past sessions not worth reporting, so one trivial session
@@ -232,9 +174,9 @@ the user's home can forge, alter, or delete any of it — the same limit
 It cannot judge whether work was trivial. It reports size and leaves that
 judgement to a person; `--min-files` exists for filtering.
 
-It says nothing when the observation itself failed. An accusation drawn from a
-degraded snapshot is worse than silence, so a degraded endpoint is reported as
-`unobserved` rather than guessed at.
+It says nothing about a session it cannot attribute. A session with no edit
+records is `unattributed`, never `read_only`: the first says nothing here can
+tell who changed what, the second would claim nothing changed.
 
 ## Checking the mechanism itself
 

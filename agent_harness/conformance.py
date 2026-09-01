@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 from typing import Any, Iterable
 
-from . import codex_sessions, journal, session_hooks
+from . import codex_sessions, journal, session_hooks, worktree
 
 SCHEMA_VERSION = 1
 
@@ -30,7 +30,10 @@ VERDICTS = (
     "conformant",
     "bypass",
     "bypass_suspected",
-    "read_only",
+    # Something may well have changed, but no edit record says this session's
+    # agent did it. Replaces `read_only`, which claimed more than the evidence
+    # supports about every session recorded before the edit hook existed.
+    "unattributed",
     "incomplete",
     "unobserved",
 )
@@ -124,7 +127,7 @@ def _judge(state: dict[str, Any]) -> dict[str, Any]:
         "ended_at": (ended or {}).get("ts"),
         "transitions": state["transitions"],
         "changed_files": 0,
-        "changed_lines": 0,
+        "edits": 0,
         "confidence": LOW,
     }
     if opened is None:
@@ -135,24 +138,38 @@ def _judge(state: dict[str, Any]) -> dict[str, Any]:
     if ended is None:
         verdict["verdict"] = "incomplete"
         return verdict
-    if not session_hooks.judgeable(
-        opened, ended
-    ) or not session_hooks.observation_sound(state["records"]):
-        # The observation failed rather than the session. Reporting it as
-        # unchanged would be a claim the evidence does not support.
-        verdict["verdict"] = "unobserved"
-        return verdict
-    # The same two rules the hook uses, called from the same place, so a
-    # report and a warning cannot disagree about one session.
-    files, lines = session_hooks.session_size(state["records"])
+    files, calls = session_hooks.session_size(state["records"])
     verdict["changed_files"] = files
-    verdict["changed_lines"] = lines
+    verdict["edits"] = calls
     verdict["confidence"] = HIGH if state["closed"] else MEDIUM
+    # The tree is reported as context and decides nothing. Both counts below
+    # come from the snapshots, and no branch here reads them.
+    before, after = (opened or {}).get("snapshot"), (ended or {}).get("snapshot")
+    verdict["tree_changed"] = worktree.dirty_changed(before, after)
+    verdict["tree_files"], verdict["tree_lines"] = _tree_context(before, after)
     if not session_hooks.edited(state["records"]):
-        verdict["verdict"] = "read_only"
+        # Without an edit record nothing says who changed what, and the tree
+        # cannot tell a session that read code from one that wrote it through
+        # the shell. Saying so is the only honest verdict; calling it
+        # read_only would be a claim about a session nobody observed writing.
+        verdict["verdict"] = "unattributed"
         return verdict
     verdict["verdict"] = "conformant" if state["transitions"] else "bypass"
     return verdict
+
+
+def _tree_context(before: Any, after: Any) -> tuple[int, int]:
+    """Describe how the tree moved, for a reader. Never for a decision."""
+
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return (0, 0)
+    files = worktree.recorded_count(after.get("files")) - worktree.recorded_count(
+        before.get("files")
+    )
+    lines = worktree.recorded_count(after.get("lines")) - worktree.recorded_count(
+        before.get("lines")
+    )
+    return (max(files, 0), max(lines, 0))
 
 
 def _contested(verdicts: list[dict[str, Any]]) -> None:
@@ -220,7 +237,7 @@ def _codex_verdicts(home: str | os.PathLike[str] | None = None) -> list[dict[str
             "ended_at": session["ended_at"],
             "transitions": 0,
             "changed_files": 0,
-            "changed_lines": 0,
+            "edits": 0,
             "confidence": LOW,
             "contested": False,
             "verdict": "bypass_suspected",

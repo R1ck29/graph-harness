@@ -30,8 +30,13 @@ MAX_HOOK_INPUT_BYTES = 1_048_576
 # A session below both thresholds is recorded but not warned about. The
 # protocol governs non-trivial work, and a harness that objects to a one-line
 # fix trains people to ignore it.
+#
+# Both are counted from edit records. Nothing the working tree reports may
+# reach this decision: six review rounds were spent on what a tree comparison
+# was allowed to conclude, and every one of them found another git command
+# that moves a tree without anybody authoring anything.
 WARN_MIN_FILES = 2
-WARN_MIN_LINES = 20
+WARN_MIN_EDITS = 5
 
 # How far back a session start will look. The scan walks past sessions not
 # worth reporting, and each one it weighs costs a git call, so without a bound
@@ -185,41 +190,15 @@ def observe(event: str, payload: dict[str, Any]) -> dict[str, Any]:
     return entry
 
 
-def judgeable(opened: dict[str, Any], ended: dict[str, Any]) -> bool:
-    """Report whether two boundaries are sound enough to draw a conclusion from.
-
-    A degraded snapshot is not evidence in either direction. Two degraded ones
-    can hash equal and hide a real edit, and one degraded endpoint can lose
-    ``HEAD`` and manufacture a change that never happened. Silence is the only
-    honest answer when the observation itself failed.
-    """
-
-    before, after = opened.get("snapshot"), ended.get("snapshot")
-    if not isinstance(before, dict) or not isinstance(after, dict):
-        return False
-    if before.get("degraded") or after.get("degraded"):
-        return False
-    return bool(before.get("git")) and bool(after.get("git"))
-
-
 def observation_sound(records: list[dict[str, Any]]) -> bool:
     """Report whether a session was observed well enough to be judged at all.
 
-    Two ways it is not. A degraded snapshot is not evidence in either
-    direction. And a snapshot taken while git had a merge, rebase, cherry-pick
-    or revert still open describes a tree git filled in, not one the session
-    wrote; because the size charged is a maximum across boundaries, a single
-    such boundary would otherwise accuse a session that aborted the operation
-    and left the repository exactly as it found it.
+    Only the boundaries matter now. A session whose opening or closing record
+    is missing cannot be placed in time, which is what attribution needs; what
+    the working tree looked like is no longer part of any judgement.
     """
 
-    snapshots = _snapshots(records)
-    if not snapshots:
-        return False
-    return not any(
-        shot.get("degraded") or shot.get("operation") or not shot.get("git")
-        for shot in snapshots
-    )
+    return any(record.get("event") == "session_open" for record in records)
 
 
 def _snapshots(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -230,132 +209,47 @@ def _snapshots(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def edits(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [record for record in records if record.get("event") == "edit"]
+
+
 def edited(records: list[dict[str, Any]]) -> bool:
-    """Report whether one session's own records show it changed code.
+    """Report whether this session's agent wrote a file.
 
-    Two terms, and both are needed. An edit event is direct evidence that this
-    session's agent wrote a file. A working tree that differs between two
-    consecutive turn boundaries covers edits made through the shell, which is
-    how a session that ignores the protocol is likely to edit.
+    One term, and it is the only one that ever answered the question. An edit
+    record says which session's agent invoked an editing tool; a working-tree
+    comparison says a tree changed and can never say who changed it. Six
+    rounds of review found six different git commands that move a tree with
+    nobody authoring anything — a pull, a conflicted merge, a stash pop, a
+    submodule update, a discard, an apply — and each fix for one exposed the
+    next.
 
-    Neither term is a head move. Comparing the two ends of a session would
-    also miss work that was committed before it closed, which is why the
-    comparison runs over every boundary rather than over the outer pair.
+    The cost is stated rather than hidden: a session that edits only through
+    the shell produces no edit record and is not reported. It is recorded as
+    `unattributed` instead of being called read-only, because something
+    plainly changed and claiming otherwise would be the same kind of lie in
+    the other direction.
     """
 
-    if any(record.get("event") == "edit" for record in records):
-        return True
-    snapshots = _snapshots(records)
-    if not any(
-        worktree.dirty_changed(before, after)
-        for before, after in zip(snapshots, snapshots[1:])
-    ):
-        return False
-    # The tree moved, but moving it is not the same as adding to it. Throwing
-    # away dirt that was already there — `git checkout -- .`, `git clean`, a
-    # hard reset — changes the digest while authoring nothing, and was
-    # classified as a bypass of zero files and zero lines.
-    return _added_something(snapshots)
-
-
-def _added_something(snapshots: list[dict[str, Any]]) -> bool:
-    """Report whether some boundary holds a dirty path the first one did not.
-
-    Compared per path rather than by counting. Subtracting counts made a
-    session that removes more than it adds look like it authored nothing: ten
-    junk files deleted and one real feature written came out as fewer dirty
-    files than it started with, and the feature sat visibly in the tree while
-    the session was reported as read-only.
-
-    Paths are hashed, and a session dirtier than the bound records that it was
-    truncated. There the coarser count comparison is the only thing left, and
-    it is used rather than guessing.
-    """
-
-    if not snapshots:
-        return False
-    first = snapshots[0]
-    if any(shot.get("paths_truncated") for shot in snapshots):
-        files = max(
-            (
-                worktree.recorded_count(shot.get("files"))
-                - worktree.recorded_count(first.get("files"))
-                for shot in snapshots
-            ),
-            default=0,
-        )
-        lines = max(
-            (
-                worktree.recorded_count(shot.get("lines"))
-                - worktree.recorded_count(first.get("lines"))
-                for shot in snapshots
-            ),
-            default=0,
-        )
-        return files > 0 or lines > 0
-    baseline = _path_set(first)
-    for shot in snapshots[1:]:
-        own = _path_set(shot)
-        if own - baseline:
-            # A path is dirty that was not dirty before: something was written.
-            return True
-        if own >= baseline and shot.get("digest") != first.get("digest"):
-            # No new path, but the same paths hold different content, which is
-            # a file rewritten in place. The superset test is what keeps this
-            # from re-admitting the discard cases: throwing dirt away also
-            # changes the digest, and it shrinks the set rather than keeping
-            # it.
-            return True
-    return False
-
-
-def _path_set(snapshot: dict[str, Any]) -> set[str]:
-    recorded = snapshot.get("paths")
-    if not isinstance(recorded, list):
-        return set()
-    return {value for value in recorded if isinstance(value, str)}
+    return bool(edits(records))
 
 
 def session_size(records: list[dict[str, Any]]) -> tuple[int, int]:
-    """Return how much one session changed, as a magnitude and never a trigger.
+    """Return how many distinct files this session wrote, and how many times.
 
-    Measured against the session's first boundary, because a tree that was
-    already dirty when it started is not its doing, and taken as a maximum
-    across boundaries, because a session that commits its work returns the
-    tree to clean before it ends.
-
-    Counting alone is not enough. A boundary that shares no dirty path with
-    the first one is entirely the session's own doing however the totals
-    compare — ten junk files deleted and one real feature written leaves fewer
-    dirty files than it started with, and netting the counts sized that
-    feature at zero and filtered it out of the report. Where the boundary
-    still holds paths the session inherited, only the increase counts.
+    Counted from edit records alone, so the number that crosses the warning
+    threshold cannot be moved by anything a git command did to the tree. The
+    report still carries the tree's own file and line counts beside this, as
+    context a person can read; nothing decides on them.
     """
 
+    recorded = edits(records)
     distinct = {
         record.get("path_id")
-        for record in records
-        if record.get("event") == "edit" and isinstance(record.get("path_id"), str)
+        for record in recorded
+        if isinstance(record.get("path_id"), str)
     }
-    snapshots = _snapshots(records)
-    if not snapshots:
-        return (len(distinct), 0)
-    first = snapshots[0]
-    baseline = _path_set(first)
-    base_files = worktree.recorded_count(first.get("files"))
-    base_lines = worktree.recorded_count(first.get("lines"))
-    files, lines = 0, 0
-    for shot in snapshots:
-        own = _path_set(shot)
-        shot_files = worktree.recorded_count(shot.get("files"))
-        shot_lines = worktree.recorded_count(shot.get("lines"))
-        if own and not (own & baseline) and not shot.get("paths_truncated"):
-            files = max(files, len(own))
-            lines = max(lines, shot_lines)
-        else:
-            files = max(files, shot_files - base_files)
-            lines = max(lines, shot_lines - base_lines)
-    return (max(len(distinct), files, 0), max(lines, 0))
+    return (len(distinct), len(recorded))
 
 
 def worth_reporting(records: list[dict[str, Any]]) -> tuple[bool, int, int]:
@@ -363,8 +257,8 @@ def worth_reporting(records: list[dict[str, Any]]) -> tuple[bool, int, int]:
 
     if not observation_sound(records) or not edited(records):
         return (False, 0, 0)
-    files, lines = session_size(records)
-    return (files >= WARN_MIN_FILES or lines >= WARN_MIN_LINES, files, lines)
+    files, calls = session_size(records)
+    return (files >= WARN_MIN_FILES or calls >= WARN_MIN_EDITS, files, calls)
 
 
 def previous_bypass(
@@ -468,9 +362,9 @@ def previous_bypass(
             # This session used the graph. Anything older has already been
             # answered by it, so the scan ends here rather than reaching back.
             return None
-        if session in reported or not judgeable(opened, ended):
+        if session in reported:
             continue
-        reportable, files, lines = worth_reporting(owned.get(session, []))
+        reportable, files, calls = worth_reporting(owned.get(session, []))
         if not reportable:
             continue
         return {
@@ -478,7 +372,7 @@ def previous_bypass(
             "repo": repo,
             "ended_at": ended.get("ts"),
             "changed_files": files,
-            "changed_lines": lines,
+            "edits": calls,
         }
     return None
 
@@ -565,8 +459,8 @@ def session_start() -> int:
     if bypass is None:
         return 0
     print(
-        "The previous session in this repository changed "
-        f"{bypass['changed_files']} file(s) and {bypass['changed_lines']} line(s) "
+        "The previous session in this repository edited "
+        f"{bypass['changed_files']} file(s) in {bypass['edits']} tool call(s) "
         "without recording any task-graph state. If that work was non-trivial it "
         "should have gone through graphctl. Run 'graphctl conformance' for the "
         "full picture.",

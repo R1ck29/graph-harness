@@ -147,8 +147,7 @@ class SessionHookTests(unittest.TestCase):
         self,
     ) -> None:
         self._start()
-        (self.repo / "tracked.txt").write_text("base\nmore\n" * 20, encoding="utf-8")
-        (self.repo / "second.txt").write_text("new\n", encoding="utf-8")
+        self._record_edits()
         self._end()
 
         with mock.patch("sys.stderr", io.StringIO()) as reported:
@@ -171,7 +170,7 @@ class SessionHookTests(unittest.TestCase):
 
     def test_a_session_that_used_the_graph_is_not_reported(self) -> None:
         self._start()
-        (self.repo / "tracked.txt").write_text("base\nmore\n" * 20, encoding="utf-8")
+        self._record_edits()
         journal.append(
             journal.record(
                 "graph_transition",
@@ -192,7 +191,7 @@ class SessionHookTests(unittest.TestCase):
 
     def test_a_session_in_another_repository_is_not_reported(self) -> None:
         self._start()
-        (self.repo / "tracked.txt").write_text("base\nmore\n" * 20, encoding="utf-8")
+        self._record_edits()
         self._end()
         elsewhere = Path(self._directory.name) / "other"
         elsewhere.mkdir()
@@ -234,12 +233,22 @@ class SessionHookTests(unittest.TestCase):
                         "git": True,
                         "head": "h",
                         "digest": f"after-{index}",
-                        "files": index * 5,
-                        "lines": index * 50,
                     },
                 ),
                 self.home,
             )
+            for step in range(5):
+                journal.append(
+                    journal.record(
+                        "edit",
+                        client="claude",
+                        session_id=session,
+                        repo=str(self.repo),
+                        tool="Edit",
+                        path_id=f"{index}{step:011x}",
+                    ),
+                    self.home,
+                )
 
         reported = session_hooks.previous_bypass(str(self.repo))
 
@@ -283,7 +292,10 @@ class SessionHookTests(unittest.TestCase):
         self.assertIsNone(session_hooks.previous_bypass(str(self.repo)))
 
     def test_either_threshold_alone_triggers_the_report(self) -> None:
-        def bypass(files: int, lines: int, session: str) -> None:
+        # Both thresholds are counted from edit records now: distinct files,
+        # or the number of editing tool calls. A session that rewrites one
+        # file many times is as much work as one that touches several.
+        def bypass(files: int, calls: int, session: str) -> None:
             journal.append(
                 journal.record(
                     "session_open",
@@ -294,33 +306,37 @@ class SessionHookTests(unittest.TestCase):
                         "git": True,
                         "head": "h",
                         "digest": "before",
-                        "files": 0,
-                        "lines": 0,
                     },
                 ),
                 self.home,
             )
+            for index in range(max(files, calls)):
+                journal.append(
+                    journal.record(
+                        "edit",
+                        client="claude",
+                        session_id=session,
+                        repo=str(self.repo),
+                        tool="Edit",
+                        path_id=f"{index % max(files, 1):012x}",
+                    ),
+                    self.home,
+                )
             journal.append(
                 journal.record(
                     "session_close",
                     client="claude",
                     session_id=session,
                     repo=str(self.repo),
-                    snapshot={
-                        "git": True,
-                        "head": "h",
-                        "digest": "after",
-                        "files": files,
-                        "lines": lines,
-                    },
+                    snapshot={"git": True, "head": "h", "digest": "after"},
                 ),
                 self.home,
             )
 
-        bypass(2, 0, "many-files")
+        bypass(session_hooks.WARN_MIN_FILES, 0, "many-files")
         self.assertIsNotNone(session_hooks.previous_bypass(str(self.repo)))
 
-        bypass(1, 20, "many-lines")
+        bypass(1, session_hooks.WARN_MIN_EDITS, "many-calls")
         self.assertIsNotNone(session_hooks.previous_bypass(str(self.repo)))
 
     def test_all_three_producers_agree_on_the_repository_key(self) -> None:
@@ -386,8 +402,7 @@ class SessionHookTests(unittest.TestCase):
 
     def test_a_bypass_is_reported_once_and_not_after_a_later_session(self) -> None:
         self._start()
-        (self.repo / "tracked.txt").write_text("base\nmore\n" * 20, encoding="utf-8")
-        (self.repo / "second.txt").write_text("new\n", encoding="utf-8")
+        self._record_edits()
         self._end()
 
         with mock.patch("sys.stderr", io.StringIO()):
@@ -414,8 +429,7 @@ class SessionHookTests(unittest.TestCase):
         # A session that changed nothing must not become "the previous
         # session" and hide the bypass before it.
         self._start()
-        (self.repo / "tracked.txt").write_text("base\nmore\n" * 20, encoding="utf-8")
-        (self.repo / "second.txt").write_text("new\n", encoding="utf-8")
+        self._record_edits()
         self._end()
 
         with mock.patch("sys.stderr", io.StringIO()) as reported:
@@ -457,8 +471,7 @@ class SessionHookTests(unittest.TestCase):
         # position, not by identity or timestamp, so a resumed session that
         # reuses its identifier still hears about its own earlier run.
         self._start()
-        (self.repo / "tracked.txt").write_text("base\nmore\n" * 20, encoding="utf-8")
-        (self.repo / "second.txt").write_text("new\n", encoding="utf-8")
+        self._record_edits()
         self._stop()
 
         with mock.patch("sys.stderr", io.StringIO()) as reported:
@@ -508,21 +521,38 @@ class SessionHookTests(unittest.TestCase):
 
         self.assertIsNone(session_hooks.previous_bypass(repository_key(self.repo)))
 
-    def _bypass(self) -> None:
-        """Leave one finished session that changed code without the graph."""
+    def _record_edits(self, session: str = "s1", count: int = 2) -> None:
+        """Record *count* editing tool calls for *session*."""
 
-        self._start()
-        (self.repo / "tracked.txt").write_text("base\nmore\n" * 20, encoding="utf-8")
-        (self.repo / "second.txt").write_text("new\n", encoding="utf-8")
-        self._end()
+        for index in range(count):
+            payload = json.loads(self._payload(session_id=session))
+            payload["tool_name"] = "Edit"
+            payload["tool_input"] = {"file_path": str(self.repo / f"f{index}.py")}
+            with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))):
+                session_hooks.record_edit()
+
+    def _bypass(self, session: str = "s1") -> None:
+        """Leave one finished session that wrote code without the graph.
+
+        Written as edit records rather than as a dirty tree, because that is
+        what the signal reads now. The behaviour these scenarios exercise —
+        reporting once, choosing between candidates, attribution, concurrency
+        — is unchanged; only the way a session is shown to have authored
+        something has moved from inference to a record of the act.
+        """
+
+        self._start(self._payload(session_id=session))
+        (self.repo / "f0.py").write_text("base\nmore\n" * 20, encoding="utf-8")
+        (self.repo / "f1.py").write_text("new\n", encoding="utf-8")
+        self._record_edits(session)
+        self._end(self._payload(session_id=session))
 
     def test_a_graphctl_run_without_a_client_session_id_still_counts(self) -> None:
         # Only one client exports a session id. Attributing a run by identity
         # left every other way of running graphctl counting for no session,
         # so the session that did use the graph was accused.
         self._start()
-        (self.repo / "tracked.txt").write_text("base\nmore\n" * 20, encoding="utf-8")
-        (self.repo / "second.txt").write_text("new\n", encoding="utf-8")
+        self._record_edits()
         journal.append(
             journal.record(
                 "graph_transition",
@@ -669,10 +699,35 @@ class SessionHookTests(unittest.TestCase):
             self.assertEqual(0, self._end())
 
     def _session(self, session_id: str, files: int, lines: int, digest: str) -> None:
-        """Record one finished session of a stated size, without a hook."""
+        """Record one finished session that wrote *files* files, without a hook.
 
+        The snapshots are kept so the record still looks like a real one, but
+        the size the scan reads comes from the edit records below them.
+        """
+
+        journal.append(
+            journal.record(
+                "session_open",
+                client="claude",
+                session_id=session_id,
+                repo=repository_key(self.repo),
+                snapshot={"git": True, "head": "a" * 40, "digest": f"{digest}-before"},
+            ),
+            self.home,
+        )
+        for index in range(files):
+            journal.append(
+                journal.record(
+                    "edit",
+                    client="claude",
+                    session_id=session_id,
+                    repo=repository_key(self.repo),
+                    tool="Edit",
+                    path_id=f"{index:012x}",
+                ),
+                self.home,
+            )
         for event, snapshot in (
-            ("session_open", {"files": 0, "lines": 0, "digest": f"{digest}-before"}),
             ("session_close", {"files": files, "lines": lines, "digest": digest}),
         ):
             journal.append(
@@ -817,21 +872,28 @@ class SessionHookTests(unittest.TestCase):
 
         self.assertEqual((0, 0), session_hooks.session_size(records))
 
-    def test_dirt_present_before_the_session_is_not_charged_to_it(self) -> None:
-        # Falling back to the absolute file count named files nobody in the
-        # session had touched.
-        records = [
+    def test_nothing_the_tree_reports_can_change_the_size(self) -> None:
+        # This replaces a test that checked pre-existing dirt was not charged
+        # to a session. The size no longer comes from the tree at all, which
+        # is a stronger statement than the one it made: a tree that claims
+        # thousands of changed files and lines moves nothing.
+        edits = [
+            {"event": "edit", "path_id": "aa", "session_id": "s"},
+            {"event": "edit", "path_id": "bb", "session_id": "s"},
+        ]
+        quiet = [{"event": "session_open", "snapshot": {"git": True, "files": 0}}]
+        loud = [
             {
                 "event": "session_open",
-                "snapshot": {"git": True, "digest": "a", "files": 5, "lines": 40},
-            },
-            {
-                "event": "session_close",
-                "snapshot": {"git": True, "digest": "b", "files": 5, "lines": 41},
-            },
+                "snapshot": {"git": True, "digest": "a", "files": 9999, "lines": 9999},
+            }
         ]
 
-        self.assertEqual((0, 1), session_hooks.session_size(records))
+        self.assertEqual(
+            session_hooks.session_size(quiet + edits),
+            session_hooks.session_size(loud + edits),
+        )
+        self.assertEqual((2, 2), session_hooks.session_size(loud + edits))
 
     def test_the_scan_does_not_reach_back_indefinitely(self) -> None:
         # Each candidate weighed costs a git call, and announcing something
@@ -1274,21 +1336,25 @@ class SignalTests(unittest.TestCase):
         self.assertIsNotNone(found)
         assert found is not None
         self.assertEqual("committer", found["session_id"])
-        # The edit events carry the file count. The line count stays zero
-        # because no turn boundary fell between the edits and the commit, so
-        # no snapshot ever saw the tree dirty. Size is a magnitude reported
-        # from what was observed, never the reason for reporting.
+        # Counted from the edit records, so committing afterwards cannot
+        # change the number.
         self.assertEqual(2, found["changed_files"])
-        self.assertEqual(0, found["changed_lines"])
+        self.assertEqual(2, found["edits"])
 
-    def test_a_shell_edit_across_two_turns_is_reported(self) -> None:
-        # No edit event: this is the case the working-tree term exists for.
-        self._open("sheller")
-        self._write(self.clone, "a.txt", "b.txt")
-        self._turn("sheller")
-        self._close("sheller")
-
-        self.assertIsNotNone(self._found())
+    # Eight tests stood here and are gone with the term they pinned. Each
+    # asserted something the working-tree comparison was supposed to conclude:
+    # that a shell edit across two turns is reported, that a stash pop and a
+    # git apply are false positives, that deleting junk while authoring is
+    # still authoring, that a created file is sized in lines, that a leftover
+    # REBASE_HEAD must not silence a shell session. Six review rounds were
+    # spent making those true and none of them ever was for long.
+    #
+    # The tree no longer concludes anything, so every one of those cases has
+    # the same answer now and it is stated once, in
+    # test_no_git_operation_can_produce_a_warning and
+    # test_a_shell_only_session_is_unattributed_not_read_only. What the
+    # deletions cost is real and is pinned by the second of those: shell
+    # authoring is no longer reported.
 
     def test_a_shell_edit_committed_inside_one_turn_is_the_known_blind_spot(
         self,
@@ -1348,7 +1414,7 @@ class SignalTests(unittest.TestCase):
         self._close("conflicted")
 
         self.assertIsNone(self._found())
-        self.assertEqual("unobserved", self._verdict("conflicted"))
+        self.assertEqual("unattributed", self._verdict("conflicted"))
 
     def test_a_conflicted_pull_that_is_aborted_is_never_reported(self) -> None:
         # The session ends with a byte-identical tree and an unmoved HEAD. It
@@ -1377,7 +1443,7 @@ class SignalTests(unittest.TestCase):
             ).stdout,
         )
         self.assertIsNone(self._found())
-        self.assertEqual("unobserved", self._verdict("aborter"))
+        self.assertEqual("unattributed", self._verdict("aborter"))
 
     def test_a_submodule_update_is_never_reported(self) -> None:
         far = Path(self._directory.name) / "far"
@@ -1427,7 +1493,7 @@ class SignalTests(unittest.TestCase):
         self._close("submoduler")
 
         self.assertIsNone(self._found())
-        self.assertEqual("read_only", self._verdict("submoduler"))
+        self.assertEqual("unattributed", self._verdict("submoduler"))
 
     def test_discarding_dirt_that_was_there_first_is_not_work(self) -> None:
         # git checkout -- ., git clean -fd and git reset --hard all move the
@@ -1443,7 +1509,7 @@ class SignalTests(unittest.TestCase):
         self._close("cleaner")
 
         self.assertIsNone(self._found())
-        self.assertEqual("read_only", self._verdict("cleaner"))
+        self.assertEqual("unattributed", self._verdict("cleaner"))
 
     def test_a_hard_reset_over_pre_session_dirt_is_not_work(self) -> None:
         self._write(self.clone, "a.txt", "b.txt")
@@ -1454,63 +1520,7 @@ class SignalTests(unittest.TestCase):
         self._close("resetter2")
 
         self.assertIsNone(self._found())
-        self.assertEqual("read_only", self._verdict("resetter2"))
-
-    def test_created_files_are_sized_in_lines_and_not_announced_as_zero(self) -> None:
-        # Untracked content contributes nothing to git diff --shortstat, so a
-        # session that creates files was announced as changing zero lines.
-        self._open("creator")
-        self._write(self.clone, "new_a.txt", "new_b.txt")
-        self._turn("creator")
-        self._close("creator")
-
-        found = self._found()
-
-        self.assertIsNotNone(found)
-        assert found is not None
-        self.assertEqual(2, found["changed_files"])
-        self.assertEqual(80, found["changed_lines"])
-
-    def test_content_that_appears_without_being_written_is_reported(self) -> None:
-        # A family, not one command. `git stash pop`, `git apply`,
-        # `cherry-pick -n`, `checkout BRANCH -- PATH` and an un-ignored build
-        # output all put content in the tree that nobody typed, leave no
-        # marker git removes, and are indistinguishable from authoring by any
-        # observation of the tree alone. Pinned and documented rather than
-        # left to be discovered one command at a time, which is how the last
-        # three review rounds went.
-        patch = Path(self._directory.name) / "change.patch"
-        patch.write_text(
-            "diff --git a/p.txt b/p.txt\n"
-            "new file mode 100644\n"
-            "--- /dev/null\n"
-            "+++ b/p.txt\n"
-            "@@ -0,0 +1,3 @@\n"
-            "+one\n+two\n+three\n",
-            encoding="utf-8",
-        )
-        self._open("applier")
-        subprocess.run(
-            ("git", "-C", str(self.clone), "apply", str(patch)),
-            capture_output=True,
-            check=False,
-        )
-        self._turn("applier")
-        self._close("applier")
-
-        self.assertEqual("bypass", self._verdict("applier"))
-
-    def test_a_stash_pop_is_a_known_false_positive(self) -> None:
-        # The same family as the test above.
-        self._write(self.clone, "a.txt", "b.txt")
-        _git(self.clone, "add", "-A")
-        _git(self.clone, "stash", "-q")
-        self._open("popper")
-        _git(self.clone, "stash", "pop", "-q")
-        self._turn("popper")
-        self._close("popper")
-
-        self.assertIsNotNone(self._found())
+        self.assertEqual("unattributed", self._verdict("resetter2"))
 
     def test_work_committed_before_every_turn_boundary_is_invisible(self) -> None:
         # The blind spot is wider than one turn: committing before each
@@ -1543,26 +1553,6 @@ class SignalTests(unittest.TestCase):
     def _git_dir(self) -> Path:
         return self.clone / ".git"
 
-    def test_a_leftover_rebase_head_does_not_silence_a_real_bypass(self) -> None:
-        # git does not remove REBASE_HEAD when a rebase finishes: on git
-        # 2.50.1 it survives the completed rebase, later commits, a checkout,
-        # a merge and a gc, and is cleared only by the next rebase. Treating
-        # it as an open operation made every session in such a repository
-        # silently unobserved. The state is constructed here rather than
-        # produced by a rebase, so the test does not depend on which git is
-        # first on PATH — which is exactly how this defect got through.
-        (self._git_dir() / "REBASE_HEAD").write_text("a" * 40, encoding="utf-8")
-        self._open("rebased")
-        self._write(self.clone, "a.txt", "b.txt")
-        self._turn("rebased")
-        self._close("rebased")
-
-        found = self._found()
-
-        self.assertIsNotNone(found)
-        assert found is not None
-        self.assertEqual("rebased", found["session_id"])
-
     def test_a_leftover_rebase_head_does_not_silence_an_editing_tool_session(
         self,
     ) -> None:
@@ -1588,57 +1578,8 @@ class SignalTests(unittest.TestCase):
                 self._turn(session)
                 self._close(session)
 
-                self.assertEqual("unobserved", self._verdict(session))
+                self.assertEqual("unattributed", self._verdict(session))
                 shutil.rmtree(directory)
-
-    def test_deleting_junk_and_writing_a_feature_is_reported(self) -> None:
-        # Reported by review: subtracting scalar counts made a session that
-        # removes more than it adds look like it authored nothing, while the
-        # file it wrote sat visibly in the tree.
-        junk = self.clone / "junk"
-        junk.mkdir()
-        self._write(junk, *[f"j{index}.txt" for index in range(10)])
-        self._open("cleaner-author")
-        shutil.rmtree(junk)
-        self._write(self.clone, "real_feature.py")
-        self._turn("cleaner-author")
-        self._close("cleaner-author")
-
-        self.assertIsNotNone(self._found())
-        self.assertEqual("bypass", self._verdict("cleaner-author"))
-
-    def test_committing_work_in_progress_then_writing_more_is_reported(self) -> None:
-        self._write(self.clone, *[f"w{index}.txt" for index in range(8)])
-        self._open("committer-author")
-        _git(self.clone, "add", "-A")
-        _git(self.clone, "commit", "-qm", "wip")
-        self._write(self.clone, "sneaky.py")
-        self._turn("committer-author")
-        self._close("committer-author")
-
-        self.assertIsNotNone(self._found())
-        self.assertEqual("bypass", self._verdict("committer-author"))
-
-    def test_discarding_a_file_then_rewriting_it_is_reported(self) -> None:
-        big = self.clone / "big.py"
-        self._write(self.clone, "big.py")
-        _git(self.clone, "add", "-A")
-        _git(self.clone, "commit", "-qm", "big")
-        big.write_text("".join(f"dirty {i}\n" for i in range(40)), encoding="utf-8")
-        self._open("rewriter")
-        _git(self.clone, "checkout", "--", "big.py")
-        big.write_text("".join(f"fresh {i}\n" for i in range(40)), encoding="utf-8")
-        self._turn("rewriter")
-        self._close("rewriter")
-
-        # The rewrite is detected — the report calls it a bypass rather than
-        # read_only, which is what attempt 2 got wrong. The hook stays silent
-        # because the magnitude cannot be established: the dirt it replaced
-        # was the same size, so the difference is zero and charging the whole
-        # file to the session would charge it dirt it inherited. Silence over
-        # a number that would be a guess.
-        self.assertEqual("bypass", self._verdict("rewriter"))
-        self.assertIsNone(self._found())
 
     def _other_git(self) -> str | None:
         """Find a git other than the one first on PATH, if the system has one.
@@ -1692,7 +1633,9 @@ class SignalTests(unittest.TestCase):
         self.assertFalse((self.clone / ".git/rebase-apply").exists())
 
         self._open("after-rebase")
-        self._write(self.clone, "a.txt", "b.txt")
+        self._write(self.clone, "a.py", "b.py")
+        self._edit("after-rebase", "a.py")
+        self._edit("after-rebase", "b.py")
         self._turn("after-rebase")
         self._close("after-rebase")
 
@@ -1701,6 +1644,167 @@ class SignalTests(unittest.TestCase):
         self.assertIsNotNone(found, f"silenced under {other}")
         assert found is not None
         self.assertEqual("after-rebase", found["session_id"])
+
+    def test_no_git_operation_can_produce_a_warning(self) -> None:
+        # The whole family, in one table, driven through the real hooks. Six
+        # review rounds were spent finding these one at a time; none of them
+        # produces an edit record, so none of them can be reported.
+        scenarios = {
+            "stash-pop": self._stash_pop,
+            "apply": self._apply_patch,
+            "cherry-pick-n": self._cherry_pick_no_commit,
+            "worktree-add": self._worktree_add,
+            "checkout-path": self._checkout_path,
+            "leftover-rebase-head": self._leftover_rebase_head,
+            "build-output": self._build_output,
+        }
+        for name, action in scenarios.items():
+            with self.subTest(scenario=name):
+                session = f"op-{name}"
+                self._open(session)
+                action()
+                self._turn(session)
+                self._close(session)
+
+                self.assertIsNone(self._found(), name)
+                self.assertNotEqual("bypass", self._verdict(session), name)
+
+    def _stash_pop(self) -> None:
+        self._write(self.clone, "s1.txt", "s2.txt")
+        _git(self.clone, "add", "-A")
+        _git(self.clone, "stash", "-q")
+        _git(self.clone, "stash", "pop", "-q")
+
+    def _apply_patch(self) -> None:
+        patch = Path(self._directory.name) / "p.patch"
+        patch.write_text(
+            "diff --git a/p.txt b/p.txt"
+            + chr(10)
+            + "new file mode 100644"
+            + chr(10)
+            + "--- /dev/null"
+            + chr(10)
+            + "+++ b/p.txt"
+            + chr(10)
+            + "@@ -0,0 +1,2 @@"
+            + chr(10)
+            + "+one"
+            + chr(10)
+            + "+two"
+            + chr(10),
+            encoding="utf-8",
+        )
+        subprocess.run(
+            ("git", "-C", str(self.clone), "apply", str(patch)),
+            capture_output=True,
+            check=False,
+        )
+
+    def _cherry_pick_no_commit(self) -> None:
+        _git(self.clone, "checkout", "-q", "-b", "pick-source")
+        self._write(self.clone, "picked.txt")
+        _git(self.clone, "add", "-A")
+        _git(self.clone, "commit", "-qm", "picked")
+        _git(self.clone, "checkout", "-q", "master")
+        subprocess.run(
+            ("git", "-C", str(self.clone), "cherry-pick", "-n", "pick-source"),
+            capture_output=True,
+            check=False,
+        )
+
+    def _worktree_add(self) -> None:
+        subprocess.run(
+            (
+                "git",
+                "-C",
+                str(self.clone),
+                "worktree",
+                "add",
+                "-q",
+                "inner",
+                "-b",
+                "wt",
+            ),
+            capture_output=True,
+            check=False,
+        )
+
+    def _checkout_path(self) -> None:
+        _git(self.clone, "checkout", "-q", "-b", "other")
+        self._write(self.clone, "fromother.txt")
+        _git(self.clone, "add", "-A")
+        _git(self.clone, "commit", "-qm", "other")
+        _git(self.clone, "checkout", "-q", "master")
+        _git(self.clone, "checkout", "other", "--", "fromother.txt")
+
+    def _leftover_rebase_head(self) -> None:
+        (self.clone / ".git" / "REBASE_HEAD").write_text("a" * 40, encoding="utf-8")
+        self._write(self.clone, "after.txt")
+
+    def _build_output(self) -> None:
+        build = self.clone / "build"
+        build.mkdir()
+        self._write(build, "out1.js", "out2.js")
+
+    def test_a_shell_only_session_is_unattributed_not_read_only(self) -> None:
+        # Not reported, because nothing says this session's agent wrote it.
+        # Not read_only either, because something plainly changed. The verdict
+        # says what is true: the change could not be attributed.
+        self._open("sheller-only")
+        self._write(self.clone, "a.txt", "b.txt")
+        self._turn("sheller-only")
+        self._close("sheller-only")
+
+        self.assertIsNone(self._found())
+        self.assertEqual("unattributed", self._verdict("sheller-only"))
+
+    def test_a_session_that_edited_is_reported(self) -> None:
+        self._open("author")
+        self._write(self.clone, "a.py", "b.py")
+        self._edit("author", "a.py")
+        self._edit("author", "b.py")
+        self._close("author")
+
+        found = self._found()
+
+        self.assertIsNotNone(found)
+        assert found is not None
+        self.assertEqual(2, found["changed_files"])
+        self.assertEqual("bypass", self._verdict("author"))
+
+    def test_the_working_tree_decides_nothing(self) -> None:
+        # Shown rather than asserted: every session's verdict and every hook
+        # exit code is recomputed with the snapshots stripped out, and nothing
+        # moves. Six review rounds were spent on what the tree was allowed to
+        # decide; this is the test that says it decides nothing.
+        from agent_harness import conformance
+
+        self._open("author2")
+        self._write(self.clone, "a.py")
+        self._edit("author2", "a.py")
+        self._close("author2")
+        self._open("sheller2")
+        self._write(self.clone, "c.txt", "d.txt")
+        self._close("sheller2")
+
+        with_tree = {
+            item["session_id"]: item["verdict"]
+            for item in conformance.report(self.home, include_codex=False)["sessions"]
+        }
+        stripped = [
+            {key: value for key, value in entry.items() if key != "snapshot"}
+            for entry in journal.read(self.home)
+        ]
+        with mock.patch.object(journal, "read", return_value=iter(stripped)):
+            without_tree = {
+                item["session_id"]: item["verdict"]
+                for item in conformance.report(self.home, include_codex=False)[
+                    "sessions"
+                ]
+            }
+
+        self.assertEqual(with_tree, without_tree)
+        self.assertEqual("bypass", with_tree["author2"])
 
     def test_commit_sizing_is_gone(self) -> None:
         self.assertFalse(hasattr(worktree, "committed_size"))

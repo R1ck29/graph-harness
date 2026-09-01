@@ -408,12 +408,17 @@ class WorktreeSnapshotTests(unittest.TestCase):
 
         self.assertEqual(before["lines"] + 3, after["lines"])
 
-    def test_a_submodule_pointer_move_is_not_a_working_tree_change(self) -> None:
-        # git moves the pointer; nobody authored anything in this repository.
+    def test_a_snapshot_carries_context_and_no_decision_fields(self) -> None:
+        # Everything the snapshot once carried for the sake of a decision is
+        # gone with the decision: the open-operation marker and the hashed
+        # dirty-path set both existed only to stop a tree comparison drawing
+        # the wrong conclusion, and nothing draws conclusions from a tree now.
         observed = worktree.snapshot(self.repo)
 
-        self.assertIsNone(observed["operation"])
         self.assertTrue(observed["git"])
+        self.assertEqual(
+            {"git", "head", "digest", "files", "lines", "degraded"}, set(observed)
+        )
 
 
 if __name__ == "__main__":
