@@ -1,12 +1,6 @@
 """Working-tree snapshots that show whether a session changed any code.
 
-A session that ignores the protocol may edit through the shell rather than an
-editing tool, so counting a client's editing tool calls misses exactly the case
-worth catching. Comparing the working tree before and after is independent of
-how the edit was made, and is one of the two terms the signal rests on; the
-other is an edit event, which says which session's agent did the writing.
-
-**Nothing here decides anything any more.** A snapshot says a tree changed and
+**Nothing here decides anything.** A snapshot says a tree changed and
 can never say who changed it: authoring, pulling, checking out, rebasing,
 popping a stash, updating a submodule and a colleague's commit in another
 terminal are one observation. Six rounds of review found six different commands

@@ -228,11 +228,11 @@ The fifth failed, on something no earlier round had looked at:
 > committed work is sized from the commits themselves, so a pull, a checkout or
 > a one-line commit is not reported
 
-`committed_size` runs `git diff --shortstat` between the two recorded heads,
+the commit-sizing helper runs `git diff --shortstat` between the two recorded heads,
 which measures a pulled or checked-out diff exactly as it measures work the
 session authored. Confirmed here directly: in a real clone, a `git pull
 --ff-only` of two upstream files of forty lines each, with the session doing
-nothing else, gives `change_size (0, 0)`, `committed_size (2, 80)` and
+nothing else, gives `change_size (0, 0)`, `the commit-sizing helper (2, 80)` and
 `worth_reporting (True, 2, 80)`, so the next session start accuses someone who
 only ran `git pull`. A branch checkout does the same. Of the three sources the
 criterion names, only the one-line commit is prevented, and the pre-existing
@@ -245,7 +245,7 @@ a `HEAD` move; there is no `merge-base`, `rev-list`, `is-ancestor` or committer
 check anywhere in `agent_harness/`.
 
 Two shipped statements assert the property the code does not have and are
-therefore also false: `docs/conformance.md:84-86` and the `committed_size`
+therefore also false: `docs/conformance.md:84-86` and the the commit-sizing helper
 docstring.
 
 No test in the 247-test suite performs a pull or a checkout. The test named in
@@ -264,7 +264,7 @@ mutation record in `tasks/artifacts/bypass-report-attempt-3-mutations.md`.
    direction this module errs in everywhere else.
 2. Add tests that perform a real pull from a real upstream clone and a real
    branch checkout, both well above `WARN_MIN_FILES` and `WARN_MIN_LINES`.
-3. Correct `docs/conformance.md:84-86` and the `committed_size` docstring.
+3. Correct `docs/conformance.md:84-86` and the the commit-sizing helper docstring.
 
 That attempt is not open. The node is at 3 of 3 and the same escalation applies:
 whether to grant a fourth is the user's decision, not this session's.
@@ -295,7 +295,10 @@ Recorded because each one changed a decision.
   therefore reads `~/.codex/state_*.sqlite`, which records every session across
   exec, TUI, desktop, and subagent runs.
 - A working-tree digest alone misses a session that commits its work; adding
-  `HEAD` catches it. Both terms are required.
+  `HEAD` catches it. **This measurement led to a design that failed six
+  reviews and was abandoned.** Both terms turned out to be the wrong question:
+  either one says a tree moved and neither says who moved it. Kept because it
+  is what was believed at the time.
 - Concurrent `O_APPEND` writes below 4096 bytes do not interleave.
 - The system `python3` here is 3.8.5, below the supported floor, so the
   interpreter behind a hook command is worth reporting.

@@ -4,12 +4,12 @@ The session hooks answer one question at one moment: did the session that
 just finished skip the graph? This answers the same question about every
 session on record, which is what makes a rate rather than an anecdote.
 
-The two share their rules deliberately. A session is judged only when its
-observation is sound, a run of ``graphctl`` inside a session's window counts
-for that session however it was launched, and sizes are differences rather
-than absolute counts. Where the hooks stay silent, this reports what it saw
-and how much it trusts it, because a report a person reads can carry doubt
-that a one-line warning cannot.
+The two share their rules deliberately, by calling the same functions rather
+than by keeping two copies in step: a session is judged on its edit records, a
+run of ``graphctl`` inside its window counts for it however it was launched,
+and sizes are counted from those same records. Where the hooks stay silent,
+this reports what it saw and how much it trusts it, because a report a person
+reads can carry doubt that a one-line warning cannot.
 """
 
 from __future__ import annotations
@@ -21,9 +21,10 @@ from . import codex_sessions, journal, session_hooks, worktree
 
 SCHEMA_VERSION = 1
 
-# What a verdict is worth. A judgement drawn from two sound snapshots of one
-# repository is worth more than one drawn from a client that records only when
-# a session began and ended.
+# What a verdict is worth. A session the client recorded closing was observed
+# to its end; one that only opened may still have been running when the record
+# was read. Snapshots reach no confidence branch, because they reach no
+# branch at all.
 HIGH, MEDIUM, LOW = "high", "medium", "low"
 
 VERDICTS = (

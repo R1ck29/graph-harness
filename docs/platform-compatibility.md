@@ -114,6 +114,36 @@ Local version: `2.1.239 (Claude Code)`.
   exited 0; the pre-existing `SessionStart` and `PostToolUse` hooks remained
   present and unchanged in count.
 
+### `PostToolUse`, measured 2026-08-31
+
+The edit signal rests on this hook, so it was measured rather than assumed.
+
+| Fact | How it was established |
+| --- | --- |
+| `PostToolUse` with a `matcher` runs in practice on this machine | `~/.claude/settings.json` already carried a working third-party entry on matcher `Edit\|Write` before this harness wrote one |
+| A hook process costs 23.6 ms bare and 40.4 ms importing `agent_harness.journal` | Ten runs of each, timed with `time` |
+| The edit hook costs 33-36 ms per invocation and spawns no process | Ten end-to-end runs of `graphctl-edit`; an independent reviewer counted spawns at the OS layer by wrapping `os.posix_spawn`, `os.fork` and `subprocess.Popen` and observed zero |
+| Deriving the repository key with `git rev-parse` cost 18.7 ms per edit | Measured before and after the change to a `.git` walk-up; the recorded `path_id` is identical either way on a real tree |
+
+Reproduction: run `graphctl-edit` with a `PostToolUse` payload on standard
+input and read `<install root>/journal/YYYY-MM.jsonl`.
+
+### Git differs between installed versions, and it mattered
+
+`REBASE_HEAD` is **not** removed when a rebase completes on `git 2.50.1`
+(`/usr/bin/git`, Apple Git-155): it survives later commits, a checkout, a merge
+and a `gc`, and is cleared only by the next rebase. On `git 2.21.0`
+(`/usr/local/bin/git`) it is removed. A design that treated the file as an
+open-operation marker therefore silenced every session in any repository where
+a rebase conflict had ever been resolved — and the test suite could not see it,
+because the older git is first on `PATH` here.
+
+Reproduction: in a scratch repository, create a conflicting rebase, resolve it,
+run `rebase --continue`, then check `git status --porcelain` (empty),
+`.git/rebase-merge` (absent) and `.git/REBASE_HEAD` (present under 2.50.1,
+absent under 2.21.0). `tests/test_session_hook_contract.py` now runs a full
+conflicted-rebase cycle under a second git when the machine has one.
+
 Sources: [memory and CLAUDE.md](https://code.claude.com/docs/en/memory),
 [extensions](https://code.claude.com/docs/en/features-overview),
 [subagents](https://code.claude.com/docs/en/sub-agents),

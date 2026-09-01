@@ -153,8 +153,18 @@ def record_edit() -> int:
     if not isinstance(tool, str) or tool not in EDIT_TOOLS:
         return 0
     target = payload.get("tool_input")
-    named = target.get("file_path") if isinstance(target, dict) else None
-    if not isinstance(named, str) or not named:
+    # NotebookEdit names its target `notebook_path`, not `file_path`. It was
+    # in the tool list and in the installer matcher while its edits were
+    # dropped, so a notebook-only session reported exactly like one that
+    # never edited at all.
+    named = None
+    if isinstance(target, dict):
+        for field in ("file_path", "notebook_path"):
+            value = target.get(field)
+            if isinstance(value, str) and value:
+                named = value
+                break
+    if named is None:
         return 0
     try:
         root = repository(payload, fast=True)
@@ -199,14 +209,6 @@ def observation_sound(records: list[dict[str, Any]]) -> bool:
     """
 
     return any(record.get("event") == "session_open" for record in records)
-
-
-def _snapshots(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [
-        snapshot
-        for snapshot in (record.get("snapshot") for record in records)
-        if isinstance(snapshot, dict)
-    ]
 
 
 def edits(records: list[dict[str, Any]]) -> list[dict[str, Any]]:

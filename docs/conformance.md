@@ -54,7 +54,7 @@ merge, `git stash pop`, a submodule update, `git apply`, discarding dirt — and
 each fix for one exposed the next. The inference is gone.
 
 The working tree is still snapshotted and still reported, as context beside the
-verdict: `tree_changed`, `tree_files` and `tree_lines`. **No verdict and no
+verdict: `tree_changed`, `tree_files` and `tree_lines`. A tree difference, a `HEAD` move included, is **context and never evidence**. **No verdict and no
 warning depends on any of them**, and a test asserts that by recomputing every
 verdict with the snapshots stripped out and comparing.
 
@@ -69,7 +69,7 @@ Size is counted from edit records too — distinct files, and the number of
 editing tool calls — so nothing a git command does to the tree can push a
 session over `WARN_MIN_FILES` or `WARN_MIN_EDITS`.
 
-## What this costs
+## What this costs: the shell blind spot
 
 **A session that edits only through the shell is not reported.** `sed`, a
 heredoc, a script: none produces an edit record, so none can be attributed.
@@ -177,6 +177,39 @@ judgement to a person; `--min-files` exists for filtering.
 It says nothing about a session it cannot attribute. A session with no edit
 records is `unattributed`, never `read_only`: the first says nothing here can
 tell who changed what, the second would claim nothing changed.
+
+## Reading back what the protocol was worth
+
+`graphctl effectiveness` folds every graph file it is given — the live one and
+the archived rounds — into counts about the harness's own outcomes: nodes
+verified, how many on the first attempt, an attempt histogram, budgets
+exhausted, attempts granted, nodes superseded, and reviews passed and failed.
+
+The figure it exists for is `failed_despite_test_evidence`: reviews that
+rejected a node whose executor had already submitted evidence of kind `test`.
+Those are defects an independent reviewer found that a green suite had not.
+
+Three limits on reading it, all real:
+
+- `share_of_failures_with_test_evidence` is that count over *review failures*,
+  not over defects. Misses are structurally unobservable — nothing records a
+  defect that review also failed to find — so it can never mean "review
+  catches everything", however close to one it sits. It is named for what it
+  measures rather than for what a reader would like it to mean.
+- `kind` is validated only as a non-empty string. "Test evidence" is the
+  executor's own assertion, not a verified green run.
+- The counts are only as complete as the graph files handed to them. A round
+  abandoned without its archive kept, or an archive not passed on the command
+  line, is simply absent; `graphs_read` says how many were folded in.
+
+It reads and writes nothing. Each node is counted once however many archives it
+appears in, and **every archive's reviews are kept**: a node re-created by a
+rebuild without its history would otherwise drop a recorded failure from the
+count, which is the same laundering by rebuild that `core/protocol.md` says the
+escape hatches exist to prevent. Where two archives disagree about a node, the
+record that reached a finished status wins, because a round abandoned mid-flight
+leaves nodes frozen at `running` with a higher attempt count than the successor
+that verified them.
 
 ## Checking the mechanism itself
 

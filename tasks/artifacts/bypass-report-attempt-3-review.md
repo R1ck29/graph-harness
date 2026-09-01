@@ -1,5 +1,13 @@
 # bypass-report, attempt 3: independent review
 
+> **Verbatim archived record. Do not correct it.** This is what an independent
+> reviewer reported on 2026-08-31, including the identifiers and claims that
+> existed then and do not now. Editing it to match today's code would falsify
+> a record of what somebody else observed, which is the opposite of what this
+> repository is for. `committed_size` and the claim about keeping a pull below
+> the threshold appear below because they were real at the time; both are gone
+> from the code and from the current documentation.
+
 Reviewer id: `claude-graph-reviewer-bypass-3`. Verdict: **FAIL**, on one of five
 criteria. Repository at `HEAD` 7b0eaf6, branch `feat/session-conformance`. The
 reviewer wrote nothing into the repository and recorded no graph state.

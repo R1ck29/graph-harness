@@ -84,6 +84,23 @@ name or directory is not automatically ignored; check `git status` before every
 commit and add the chosen graph path to `.gitignore` when it contains internal
 operational records.
 
+## What the edit hook records
+
+The `PostToolUse` hook records that an editing tool ran: the client, the
+session, the repository root, the tool's name, and `path_id` — the first twelve
+hexadecimal characters of the SHA-256 of the edited path relative to the
+repository.
+
+**The path itself is never recorded, and neither is any file content.** A path
+is content enough: a filename can name a customer, so `clients/acme/contract.md`
+would leak one by existing in a log. The hash counts how many distinct files a
+session touched and identifies none of them. Nothing in the payload a client
+sends — the edit's old text, its new text, the file's contents — is read or
+stored.
+
+The same rule governs the working-tree snapshot beside it, which records a
+digest, counts, and `HEAD`, and no path.
+
 Session observations are not an audit trail and must never be described as
 one. They live in ordinary files that any process running as the user can
 append to, rewrite, or delete, exactly as the executor and reviewer identities

@@ -853,8 +853,8 @@ class Graph:
         self._require_non_empty(reason, "reason")
         if node["status"] not in {"failed", "invalidated"}:
             raise HarnessError(
-                f"only a failed node can be granted an attempt: {node_id} is "
-                f"{node['status']}"
+                f"only a failed or invalidated node can be granted an attempt: "
+                f"{node_id} is {node['status']}"
             )
         if node["max_attempts"] >= MAX_ATTEMPTS:
             raise HarnessError(

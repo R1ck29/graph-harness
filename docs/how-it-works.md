@@ -114,6 +114,33 @@ Plus a rate: of the sessions that changed something and could be judged, what
 fraction used the process.
 
 ```
+graphctl effectiveness
+```
+
+This answers the question the whole repository is an argument about: **is any
+of this worth the trouble?** It reads back what happened to every task ever
+recorded here and counts the outcomes — how many tasks passed on the first
+attempt, how much rework there was, how often a budget ran out, and above all
+how many times an independent reviewer rejected work whose author had already
+run the tests and reported them green.
+
+That last figure is the case for the whole arrangement. Run the command and
+read it off; do not take a number from this page, because the number moves as
+work is done. As this was written it printed
+`"failed_despite_test_evidence": 13` across
+`"nodes_with_such_a_failure": 8`. Among those
+rejections: a warning that fired at anyone who ran `git pull`; a stale file
+left by one version of git that silenced every session in a repository; a
+*read* of a file being recorded as a *write*. None of those was caught by a
+test suite that was green at the time.
+
+Every rate is printed next to the count it was taken over, because with three
+projects on record these are anecdotes and a reader should be able to see that.
+The rate on that figure is deliberately not called a catch rate: its
+denominator is *rejections*, not *defects*, and a defect the reviewer also
+missed is recorded nowhere, so it can never mean "review finds everything".
+
+```
 graphctl doctor
 ```
 

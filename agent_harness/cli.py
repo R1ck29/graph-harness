@@ -254,9 +254,9 @@ def _journal_diagnostics() -> dict[str, Any]:
         if client not in edits:
             report["warnings"].append(
                 f"No {client} edit has been observed. Its PostToolUse hook may "
-                "not be installed, which leaves the working-tree comparison as "
-                "the only signal and loses every session that commits inside a "
-                "single turn."
+                "not be installed, in which case there is no signal at all for "
+                "that client and every one of its sessions reports as "
+                "unattributed."
             )
     return report
 
@@ -394,6 +394,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commands.add_parser("status", help="summarize progress")
     commands.add_parser("completion-check", help="check whether every task is verified")
+
+    effect = commands.add_parser(
+        "effectiveness",
+        help="report what independent review caught and what rework cost",
+    )
+    effect.add_argument(
+        "--graph",
+        action="append",
+        default=[],
+        dest="graphs",
+        help="a graph file to fold in; repeat for archives. Defaults to every "
+        "task-graph*.json beside the workspace graph",
+    )
 
     start = commands.add_parser("start", help="start a ready task and open an attempt")
     start.add_argument("node")
@@ -601,6 +614,13 @@ def run(args: argparse.Namespace) -> Any:
         )
     if args.command == "status":
         return store.load().status_summary()
+    if args.command == "effectiveness":
+        from . import effectiveness
+
+        chosen = [Path(name) for name in args.graphs]
+        if not chosen:
+            chosen = sorted(Path.cwd().glob("task-graph*.json"))
+        return effectiveness.report(chosen)
     if args.command == "completion-check":
         graph = store.load()
         graph.completion_check()

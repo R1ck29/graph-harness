@@ -1154,7 +1154,7 @@ class EscapeHatchTests(unittest.TestCase):
     def test_a_grant_is_refused_on_a_node_that_has_not_failed(self) -> None:
         task_graph = Graph.from_dict(graph(node("fix", status="ready")))
 
-        with self.assertRaisesRegex(HarnessError, "only a failed node"):
+        with self.assertRaisesRegex(HarnessError, "only a failed or invalidated node"):
             task_graph.grant_attempt("fix", granted_by="rick", reason="because")
 
     def test_a_grant_requires_a_grantor_and_a_reason(self) -> None:

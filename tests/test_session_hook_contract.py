@@ -1074,6 +1074,26 @@ class SessionHookTests(unittest.TestCase):
             [entry["tool"] for entry in self._edits()],
         )
 
+    def test_a_notebook_edit_names_its_target_differently_and_still_counts(
+        self,
+    ) -> None:
+        # NotebookEdit was in the tool list and in the installer matcher while
+        # its edits were dropped, because it carries notebook_path rather than
+        # file_path. A notebook-only session reported exactly like one that
+        # never edited at all.
+        payload = json.loads(self._payload(session_id="N1"))
+        payload["tool_name"] = "NotebookEdit"
+        payload["tool_input"] = {"notebook_path": str(self.repo / "study.ipynb")}
+
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))):
+            self.assertEqual(0, session_hooks.record_edit())
+
+        recorded = self._edits()
+        self.assertEqual(1, len(recorded))
+        self.assertEqual("NotebookEdit", recorded[0]["tool"])
+        self.assertRegex(recorded[0]["path_id"], r"^[0-9a-f]{12}$")
+        self.assertNotIn("study", self._journal_text())
+
     def test_an_edit_that_cannot_be_recorded_still_exits_zero(self) -> None:
         payload = self._edit_payload("E3", "Edit", str(self.repo / "a.py"))
 
@@ -1773,10 +1793,13 @@ class SignalTests(unittest.TestCase):
         self.assertEqual("bypass", self._verdict("author"))
 
     def test_the_working_tree_decides_nothing(self) -> None:
-        # Shown rather than asserted: every session's verdict and every hook
-        # exit code is recomputed with the snapshots stripped out, and nothing
-        # moves. Six review rounds were spent on what the tree was allowed to
-        # decide; this is the test that says it decides nothing.
+        # Shown rather than asserted: every session's verdict is recomputed
+        # with the snapshots stripped out of the journal, and nothing moves.
+        # This covers the verdict half only — the warning half is covered by
+        # test_no_git_operation_can_produce_a_warning and
+        # test_a_shell_only_session_is_unattributed_not_read_only, which a
+        # review confirmed catch a tree-driven warning in thirteen places
+        # while this test alone does not.
         from agent_harness import conformance
 
         self._open("author2")
