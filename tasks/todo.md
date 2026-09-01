@@ -8,11 +8,11 @@ Step plan: `docs/superpowers/plans/2026-08-31-conformance-redesign.md`.
 Executable plan: `task-graph.json` (7 nodes), which is the authority for status.
 
 - [x] `edit-events` — record an editing tool call, never a path or its contents.
-- [ ] `bypass-signal` — judge on edit events and dirty-tree differences; a head
-      move becomes context, never evidence. **Budget exhausted at 2 of 2.**
-- [ ] `installer-hook` — manage the edit hook on both clients.
-- [ ] `escape-hatches` — `grant-attempt` and `supersede`, so a person's decision
+- [x] `installer-hook` — manage the edit hook on both clients.
+- [x] `escape-hatches` — `grant-attempt` and `supersede`, so a person's decision
       is recorded rather than hand-edited.
+- [ ] `bypass-signal` — judge on edit events and dirty-tree differences.
+      **Failed three reviews; budget exhausted at 3 of 3.**
 - [ ] `effectiveness` — count what independent review caught, what rework cost,
       and how often the protocol was followed.
 - [ ] `docs` — describe the signal the code actually uses, blind spot included.
@@ -86,9 +86,12 @@ The cost is real and must be documented, not glossed: a session that edits only
 through the shell stops producing a warning. Whether that gap is worth closing
 later is a separate question with a separate answer — a `Bash` `PostToolUse`
 event would give the same causal attribution for shell writes that `Edit` gives
-for tool writes, and it belongs in its own node with its own review. The same escalation as
-before applies: whether to grant a third is the user's decision, not this
-session's.
+for tool writes, and it belongs in its own node with its own review.
+
+Retiring a node and granting an attempt both require an explicit instruction
+from the user. Neither has been run for this node by this session.
+
+## What each earlier attempt was caught doing
 
 **Attempt 1** removed the `HEAD` term, and the dirty-tree term inherited the
 same defect. A conflicted `git pull` was reported; so was the same session after
