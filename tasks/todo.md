@@ -5,18 +5,64 @@ what the harness itself catches.
 
 Design: `docs/superpowers/specs/2026-08-31-conformance-redesign-design.md`.
 Step plan: `docs/superpowers/plans/2026-08-31-conformance-redesign.md`.
-Executable plan: `task-graph.json` (7 nodes), which is the authority for status.
+Executable plan: `task-graph.json` (8 nodes), which is the authority for status.
+
+**Complete.** `graphctl completion-check` returns `{"complete": true}`: seven
+nodes verified and one superseded, each verified node carrying an independent
+PASS from a reviewer that reproduced its criteria rather than reading its
+evidence.
 
 - [x] `edit-events` — record an editing tool call, never a path or its contents.
 - [x] `installer-hook` — manage the edit hook on both clients.
 - [x] `escape-hatches` — `grant-attempt` and `supersede`, so a person's decision
       is recorded rather than hand-edited.
-- [ ] `bypass-signal` — judge on edit events and dirty-tree differences.
-      **Failed three reviews; budget exhausted at 3 of 3.**
-- [ ] `effectiveness` — count what independent review caught, what rework cost,
+- [~] `bypass-signal` — superseded. Judged on a working-tree comparison; failed
+      three reviews here and three in the graph before it, every failure in that
+      one term.
+- [x] `edit-signal` — its replacement. A bypass is reported from edit records
+      alone; the tree is context and decides nothing.
+- [x] `effectiveness` — count what independent review caught, what rework cost,
       and how often the protocol was followed.
-- [ ] `docs` — describe the signal the code actually uses, blind spot included.
-- [ ] `gate` — the full local verification gate.
+- [x] `docs` — describe the signal the code actually uses, blind spot included.
+- [x] `gate` — the full local verification gate.
+
+## What the harness caught in its own construction
+
+`graphctl effectiveness` over this repository's four graphs, at the moment the
+objective closed: **14 review failures across 8 nodes, every one of them
+recorded against evidence that already included passing tests.** Not one of
+those defects was found by a suite that was green at the time. Among them:
+
+- `git pull` reported as a protocol bypass, twice, by two different designs.
+- A `REBASE_HEAD` file that git 2.50.1 leaves behind after a completed rebase,
+  which silenced every session in any repository where a rebase conflict had
+  ever been resolved — invisible to the suite because the git first on `PATH`
+  here is 2.21.0 and removes it.
+- A `Read` recorded as an edit; a concurrent double-claim; a forged `HEAD`
+  reaching a git argument list; edits to files with Japanese names invisible.
+
+Two more were found by the final gate itself, which no node's tests covered:
+`graphctl doctor` crashing on a broken install root, and the same guard gap in
+the runtime probe.
+
+## Known limits, stated because a reader who believes there are none is worse off
+
+- **Shell-only editing is not reported.** `sed`, a heredoc, a script: none
+  produces an edit record. Such sessions are `unattributed`, never `read_only`.
+  The remedy is another direct signal — a `Bash` `PostToolUse` event — not
+  another inference. Deliberately not built.
+- **A month file that is a FIFO or a device symlink hangs the reporting
+  commands.** The write path guards against link-like paths; the read path has
+  no equivalent regular-file check. It needs write access to the journal
+  directory, which the threat model already concedes, but it is a one-line fix
+  worth making.
+- **Edits outside the repository count toward the thresholds**, hashed whole and
+  attributed to the project, so heavy scratchpad use inflates a session's size.
+- **The journal is forgeable and is not an audit trail.** Anyone who can write
+  the home can add, alter or remove records.
+- **`share_of_failures_with_test_evidence` is not a catch rate.** Its
+  denominator is rejections, not defects; a defect review also missed is
+  recorded nowhere.
 
 ## Where `bypass-signal` stands
 
@@ -228,11 +274,11 @@ The fifth failed, on something no earlier round had looked at:
 > committed work is sized from the commits themselves, so a pull, a checkout or
 > a one-line commit is not reported
 
-the commit-sizing helper runs `git diff --shortstat` between the two recorded heads,
+The commit-sizing helper ran `git diff --shortstat` between the two recorded heads,
 which measures a pulled or checked-out diff exactly as it measures work the
 session authored. Confirmed here directly: in a real clone, a `git pull
 --ff-only` of two upstream files of forty lines each, with the session doing
-nothing else, gives `change_size (0, 0)`, `the commit-sizing helper (2, 80)` and
+nothing else, gave `change_size (0, 0)` against a commit-sized `(2, 80)` and
 `worth_reporting (True, 2, 80)`, so the next session start accuses someone who
 only ran `git pull`. A branch checkout does the same. Of the three sources the
 criterion names, only the one-line commit is prevented, and the pre-existing
@@ -245,7 +291,7 @@ a `HEAD` move; there is no `merge-base`, `rev-list`, `is-ancestor` or committer
 check anywhere in `agent_harness/`.
 
 Two shipped statements assert the property the code does not have and are
-therefore also false: `docs/conformance.md:84-86` and the the commit-sizing helper
+therefore also false: `docs/conformance.md:84-86` and the commit-sizing helper's
 docstring.
 
 No test in the 247-test suite performs a pull or a checkout. The test named in
@@ -264,7 +310,7 @@ mutation record in `tasks/artifacts/bypass-report-attempt-3-mutations.md`.
    direction this module errs in everywhere else.
 2. Add tests that perform a real pull from a real upstream clone and a real
    branch checkout, both well above `WARN_MIN_FILES` and `WARN_MIN_LINES`.
-3. Correct `docs/conformance.md:84-86` and the the commit-sizing helper docstring.
+3. Correct `docs/conformance.md:84-86` and the commit-sizing helper's docstring.
 
 That attempt is not open. The node is at 3 of 3 and the same escalation applies:
 whether to grant a fourth is the user's decision, not this session's.
@@ -303,6 +349,3 @@ Recorded because each one changed a decision.
 - The system `python3` here is 3.8.5, below the supported floor, so the
   interpreter behind a hook command is worth reporting.
 
-## Review
-
-Pending completion.

@@ -54,8 +54,9 @@ merge, `git stash pop`, a submodule update, `git apply`, discarding dirt — and
 each fix for one exposed the next. The inference is gone.
 
 The working tree is still snapshotted and still reported, as context beside the
-verdict: `tree_changed`, `tree_files` and `tree_lines`. A tree difference, a `HEAD` move included, is **context and never evidence**. **No verdict and no
-warning depends on any of them**, and a test asserts that by recomputing every
+verdict: `tree_changed`, `tree_files` and `tree_lines`. A tree difference,
+a `HEAD` move included, is **context and never evidence**: no verdict and no
+warning depends on any of them, and a test asserts that by recomputing every
 verdict with the snapshots stripped out and comparing.
 
 The snapshot digest covers the porcelain status, the staged and unstaged diffs,

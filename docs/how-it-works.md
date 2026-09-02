@@ -124,15 +124,24 @@ attempt, how much rework there was, how often a budget ran out, and above all
 how many times an independent reviewer rejected work whose author had already
 run the tests and reported them green.
 
-That last figure is the case for the whole arrangement. Run the command and
-read it off; do not take a number from this page, because the number moves as
-work is done. As this was written it printed
-`"failed_despite_test_evidence": 13` across
-`"nodes_with_such_a_failure": 8`. Among those
-rejections: a warning that fired at anyone who ran `git pull`; a stale file
-left by one version of git that silenced every session in a repository; a
-*read* of a file being recorded as a *write*. None of those was caught by a
-test suite that was green at the time.
+That last figure is the case for the whole arrangement, and this page
+deliberately does not quote it. Run the command and read
+`"failed_despite_test_evidence"` and `"nodes_with_such_a_failure"` off for
+yourself: the count moves every time a review records a verdict, and a figure
+printed here would be stale by the next one. It was already stale twice while
+this paragraph was being written.
+
+Two rejections it counts: a warning that fired at anyone who ran `git pull`, and
+a stale file left by one version of git that silenced every session in a
+repository. Neither was caught by a test suite that was green at the time.
+
+Review also turns up things it does *not* reject a task for. A reviewer once
+noticed that a *read* of a file was being recorded as a *write* — real, and
+fixed — but it said so as a side note inside a review it passed, so it is not
+one of the rejections counted above. The distinction is kept here because a
+report that quietly widened "what review caught" to include everything a
+reviewer ever mentioned would be doing the thing this whole repository exists
+to prevent.
 
 Every rate is printed next to the count it was taken over, because with three
 projects on record these are anecdotes and a reader should be able to see that.

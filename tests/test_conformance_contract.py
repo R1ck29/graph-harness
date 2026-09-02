@@ -678,3 +678,48 @@ class EscapeHatchTransitionTests(unittest.TestCase):
         self.assertEqual(0, outcome)
         self.assertIn("supersede", self._commands())
         self.assertEqual(0, self._run("completion-check"))
+
+
+class BrokenInstallationTests(unittest.TestCase):
+    """doctor is the one command that must not break when the install is.
+
+    Found by the verification gate, not by this suite: with the install root a
+    regular file rather than a directory, `graphctl doctor` exited 2 with a raw
+    `[Errno 20] Not a directory`, while `conformance` and `effectiveness`
+    both survived the same home. Two separate reads were guarded against
+    `HarnessError` only, and resolving a path touches the filesystem, so the
+    failure arrived as an errno instead.
+    """
+
+    def setUp(self) -> None:
+        self._directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._directory.cleanup)
+        self.home = Path(self._directory.name)
+        (self.home / ".local" / "share").mkdir(parents=True)
+        # Where the install root belongs, put a file.
+        (self.home / ".local" / "share" / "graph-engineering-agent-harness").write_text(
+            "not a directory", encoding="utf-8"
+        )
+        self._environment = mock.patch.dict(
+            os.environ, {"GRAPH_HARNESS_HOME": str(self.home)}
+        )
+        self._environment.start()
+        self.addCleanup(self._environment.stop)
+
+    def test_every_reporting_command_survives_an_unusable_install_root(self) -> None:
+        workspace = Path(self._directory.name) / "work"
+        workspace.mkdir()
+        previous = os.getcwd()
+        os.chdir(workspace)
+        self.addCleanup(os.chdir, previous)
+
+        for command in (["doctor"], ["conformance"], ["effectiveness"]):
+            with self.subTest(command=command[0]):
+                self.assertEqual(0, cli.main(command), command)
+
+    def test_doctor_names_the_broken_journal_rather_than_raising(self) -> None:
+        report = cli._journal_diagnostics()
+
+        self.assertEqual(0, report["journal_bytes"])
+        self.assertEqual([], report["journal_months"])
+        self.assertTrue(report["warnings"])

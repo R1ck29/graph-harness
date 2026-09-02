@@ -64,9 +64,12 @@ its verdict.
 The session-start hook additionally reports, on standard error, when the
 previous session in that repository changed code without recording any
 task-graph state. It never blocks a session, and it reports a given session at
-most once. Sizes come from `git`, and a recorded commit name is refused unless
-it is a forty-character hexadecimal sha, so a forged record cannot turn into a
-git argument.
+most once. Sizes come from the session's own edit records — distinct files and
+editing tool calls — so nothing a git command did to the working tree can push
+a session over the reporting threshold. No recorded value is passed to `git` as
+an argument at all, which is a stronger guarantee than the validation this
+sentence used to describe: the journal is forgeable, and the safest thing to do
+with a forgeable value is not to consume it.
 
 The harness does not auto-approve destructive commands, bypass sandboxes, or
 require external services. It does persist submitted and reviewer evidence in

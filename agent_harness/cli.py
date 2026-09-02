@@ -178,12 +178,16 @@ def _runtime_diagnostics() -> dict[str, Any]:
     }
     try:
         config = user_data_path("venv/pyvenv.cfg")
-    except HarnessError:
+    except (HarnessError, OSError):
+        # Same guard as the journal reads below. Resolving this path touches
+        # the filesystem, so a home whose install root is a regular file
+        # raises an errno rather than a harness error, and doctor is the one
+        # command that must not break when the installation is broken.
         return report
     report["runtime_path"] = str(config.parent)
     try:
         lines = config.read_text(encoding="utf-8").splitlines()
-    except OSError:
+    except (OSError, ValueError):
         return report
     for line in lines:
         name, separator, value = line.partition("=")
@@ -212,20 +216,33 @@ def _journal_diagnostics() -> dict[str, Any]:
 
     report: dict[str, Any] = {
         "journal_path": None,
-        "journal_bytes": journal.total_bytes(),
-        "journal_months": [path.name for path in journal.month_files()],
+        "journal_bytes": 0,
+        "journal_months": [],
         "last_observed": {},
         "edit_hook_last_seen": {},
         "warnings": [],
     }
+    # Every read below is guarded, and the guards are the point of the
+    # command: doctor exists to report that the observation is broken, so it
+    # is the one command that must not break when it is. Building the report
+    # with these calls inline left an OSError to escape when the journal path
+    # was a regular file rather than a directory, and doctor exited 2 with a
+    # raw errno where conformance and effectiveness both survived.
     try:
         report["journal_path"] = str(journal.journal_directory())
-    except HarnessError as exc:
+        report["journal_bytes"] = journal.total_bytes()
+        report["journal_months"] = [path.name for path in journal.month_files()]
+    except (HarnessError, OSError) as exc:
         report["warnings"].append(f"The journal directory is unusable: {exc}")
         return report
     latest: dict[str, str] = {}
     edits: dict[str, str] = {}
-    for entry in journal.read():
+    try:
+        entries = list(journal.read())
+    except (HarnessError, OSError) as exc:
+        report["warnings"].append(f"The journal could not be read: {exc}")
+        return report
+    for entry in entries:
         # The edit hook is the only producer that proves PostToolUse fires.
         # A client can record boundaries perfectly and still have no edit
         # hook installed, in which case the shell term is carrying the whole
