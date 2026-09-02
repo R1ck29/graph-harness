@@ -15,9 +15,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, TextIO
 
 from .errors import HarnessError
 from .graph import utc_now
@@ -210,12 +211,38 @@ def _write_line(path: Path, line: str) -> None:
         os.close(descriptor)
 
 
+def is_named_month(path: Path) -> bool:
+    """Report whether *path* is named like a month and is a plain file.
+
+    Used by the callers that must *name* months without opening them, which
+    is pruning and sizing. Readers do not use it: a check here and an open
+    later is two syscalls with a window between them, and a writer racing
+    that window put a FIFO back in place often enough to hang three reads in
+    forty. `open_month` closes the window instead.
+
+    Every failure is answered rather than raised. An earlier version called
+    the link check outside this guard, and because that helper answers only a
+    missing file, one unreadable month raised out of the enumeration and lost
+    every other month with it.
+    """
+
+    try:
+        if not MONTH_NAME.fullmatch(path.name):
+            return False
+        if is_link_like(path):
+            return False
+        return stat.S_ISREG(path.lstat().st_mode)
+    except OSError:
+        return False
+
+
 def month_files(home: str | os.PathLike[str] | None = None) -> list[Path]:
     """Return the journal's month files, oldest first.
 
-    Only ``YYYY-MM.jsonl`` names count. Anything else a person or another tool
-    leaves in the directory must not be read as history, and must not consume
-    the retention budget and push a real month out of it.
+    Only ``YYYY-MM.jsonl`` names count, and only regular files that are not
+    links. Anything else a person or another tool leaves in the directory must
+    not be read as history, must not consume the retention budget and push a
+    real month out of it, and must not be opened at all.
     """
 
     try:
@@ -223,7 +250,7 @@ def month_files(home: str | os.PathLike[str] | None = None) -> list[Path]:
         candidates = sorted(directory.glob("*.jsonl"))
     except (HarnessError, OSError, ValueError, RuntimeError):
         return []
-    return [path for path in candidates if MONTH_NAME.fullmatch(path.name)]
+    return [path for path in candidates if is_named_month(path)]
 
 
 def read(home: str | os.PathLike[str] | None = None) -> Iterator[dict[str, Any]]:
@@ -236,14 +263,8 @@ def read(home: str | os.PathLike[str] | None = None) -> Iterator[dict[str, Any]]
     """
 
     for month in month_files(home):
-        try:
-            # A killed writer can cut a line mid-character, and a short
-            # write can too. Strict decoding would turn one damaged byte
-            # into an unhandled error for every reader of the history,
-            # including the doctor command the recovery procedure relies
-            # on, so damage is replaced rather than raised.
-            handle = month.open("r", encoding="utf-8", errors="replace")
-        except OSError:
+        handle = open_month(month)
+        if handle is None:
             continue
         with handle:
             for line in handle:
@@ -253,6 +274,53 @@ def read(home: str | os.PathLike[str] | None = None) -> Iterator[dict[str, Any]]
                     continue
                 if isinstance(entry, dict) and isinstance(entry.get("event"), str):
                     yield entry
+
+
+def open_month(path: Path) -> "TextIO | None":
+    """Open one month for reading, or return None when it must not be read.
+
+    The type is decided from the descriptor this call already holds, not from
+    a separate `lstat`, so there is no window for anything to be swapped in
+    between the two. Three flags carry the guarantee:
+
+    ``O_NOFOLLOW`` refuses a symlink outright, which is the same refusal the
+    writer makes. ``O_NONBLOCK`` means a FIFO with no writer returns a
+    descriptor instead of blocking forever, which is the defect this exists
+    for: ``open`` raising was already handled, ``open`` *blocking* was not.
+    And ``fstat`` then rejects anything that is not a regular file, so a
+    directory, a socket or a device is closed unread.
+
+    ``O_NONBLOCK`` is cleared afterwards. It has no effect on a regular file,
+    but leaving a flag set that the caller did not ask for is the kind of
+    thing that surprises somebody later.
+
+    A killed writer can cut a line mid-character, so decoding replaces damage
+    rather than raising: one bad byte must not make a whole history
+    unreadable for the doctor command the recovery procedure depends on.
+    """
+
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            os.close(descriptor)
+            return None
+        if hasattr(os, "set_blocking"):
+            # Named for the call it protects. It guarded a different symbol
+            # before, which is true of this platform but would have escaped
+            # the OSError handler below as an AttributeError if it ever were
+            # not.
+            os.set_blocking(descriptor, True)
+        return os.fdopen(descriptor, "r", encoding="utf-8", errors="replace")
+    except OSError:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        return None
 
 
 def prune(

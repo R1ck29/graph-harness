@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
+from typing import cast
 from unittest import mock
 
 from agent_harness import journal, worktree
@@ -423,3 +425,212 @@ class WorktreeSnapshotTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class JournalReadGuardTests(unittest.TestCase):
+    """Nothing a person can leave in the journal directory may hang a report.
+
+    Found by the verification gate: `append` refuses a link-like path and opens
+    with `O_NOFOLLOW`, while `read` had no equivalent check, so a month file
+    that was a FIFO or a symlink to a device blocked `doctor`, `conformance`
+    and `effectiveness` forever. `open()` raising was guarded; `open()`
+    blocking was not.
+    """
+
+    def setUp(self) -> None:
+        self._directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._directory.cleanup)
+        self.home = Path(self._directory.name)
+        self.journal = (
+            self.home / ".local/share/graph-engineering-agent-harness/journal"
+        )
+        self.journal.mkdir(parents=True)
+
+    def _real_month(self, name: str = "2026-08.jsonl") -> None:
+        (self.journal / name).write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "event": "session_open",
+                    "ts": "t",
+                    "client": "claude",
+                    "session_id": "s",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def _read_within(self, seconds: float = 5.0) -> list[dict[str, object]]:
+        """Read the journal in a subprocess, so a hang fails instead of wedging."""
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import json,sys;"
+                "sys.path.insert(0, sys.argv[1]);"
+                "from agent_harness import journal;"
+                "print(json.dumps([e for e in journal.read(sys.argv[2])]))",
+                str(REPOSITORY),
+                str(self.home),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=seconds,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        return cast("list[dict[str, object]]", json.loads(result.stdout))
+
+    def test_a_fifo_month_file_is_skipped_rather_than_read(self) -> None:
+        self._real_month()
+        os.mkfifo(self.journal / "2026-09.jsonl")
+
+        records = self._read_within()
+
+        self.assertEqual(1, len(records), "the real month is still read")
+
+    def test_a_month_symlinked_to_a_device_is_skipped(self) -> None:
+        self._real_month()
+        (self.journal / "2026-09.jsonl").symlink_to("/dev/zero")
+
+        records = self._read_within()
+
+        self.assertEqual(1, len(records))
+
+    def test_a_directory_named_like_a_month_is_skipped(self) -> None:
+        self._real_month()
+        (self.journal / "2026-09.jsonl").mkdir()
+
+        self.assertEqual(1, len(self._read_within()))
+
+    def test_a_month_symlinked_to_a_regular_file_is_still_refused(self) -> None:
+        # The write path refuses a link-like path outright; the read path now
+        # matches it, so the two no longer disagree about what is safe.
+        self._real_month()
+        elsewhere = self.home / "elsewhere.jsonl"
+        elsewhere.write_text(
+            json.dumps({"schema_version": 2, "event": "turn_end", "ts": "t"}) + "\n",
+            encoding="utf-8",
+        )
+        (self.journal / "2026-09.jsonl").symlink_to(elsewhere)
+
+        self.assertEqual(1, len(self._read_within()))
+
+    def test_an_unreadable_month_does_not_blind_the_rest(self) -> None:
+        self._real_month()
+        blocked = self.journal / "2026-09.jsonl"
+        blocked.write_text("{}\n", encoding="utf-8")
+        blocked.chmod(0o000)
+        self.addCleanup(blocked.chmod, 0o600)
+
+        self.assertEqual(1, len(self._read_within()))
+
+    def test_one_month_that_cannot_be_stat_ed_does_not_lose_the_others(self) -> None:
+        # The first fix called the link check outside its guard, and that
+        # helper answers only a missing file, so one EACCES month raised out
+        # of the enumeration and took every readable month with it.
+        #
+        # The blocked path is built from the *resolved* home. An earlier
+        # version built it from the raw temporary directory while the code
+        # resolves /var to /private/var, so the mock never fired once and the
+        # test passed against the very defect it was written for.
+        for name in ("2026-07.jsonl", "2026-08.jsonl", "2026-09.jsonl"):
+            self._real_month(name)
+        resolved = journal.journal_directory(self.home)
+        blocked = str(resolved / "2026-08.jsonl")
+        real_stat = os.stat
+        seen: list[str] = []
+
+        def refusing(path, *args, **kwargs):  # type: ignore[no-untyped-def]
+            seen.append(str(path))
+            if str(path) == blocked:
+                raise PermissionError(13, "Permission denied", blocked)
+            return real_stat(path, *args, **kwargs)
+
+        with mock.patch("os.stat", refusing):
+            months = [path.name for path in journal.month_files(self.home)]
+            records = list(journal.read(self.home))
+
+        self.assertIn(blocked, seen, "the mock must actually fire")
+        # The unreadable month is dropped; the readable ones survive it.
+        self.assertEqual(["2026-07.jsonl", "2026-09.jsonl"], months)
+        self.assertEqual(2, len(records))
+
+    def test_an_unsearchable_journal_directory_does_not_fail_a_command(self) -> None:
+        self._real_month()
+        self.journal.chmod(0o400)
+        self.addCleanup(self.journal.chmod, 0o700)
+        workspace = self.home / "work-unsearchable"
+        workspace.mkdir()
+
+        for command in ("doctor", "conformance", "effectiveness"):
+            with self.subTest(command=command):
+                result = subprocess.run(
+                    [sys.executable, str(REPOSITORY / "scripts/graphctl.py"), command],
+                    cwd=workspace,
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    env={**os.environ, "GRAPH_HARNESS_HOME": str(self.home)},
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_a_month_swapped_for_a_fifo_after_it_is_named_cannot_hang(self) -> None:
+        # A check followed by an open is two syscalls with a window between
+        # them, and a writer racing that window hung three reads in forty.
+        # open_month decides from the descriptor it already holds, so a swap
+        # can only make the open fail, never make it block.
+        #
+        # Driven in a subprocess under a timeout like every other test here.
+        # An earlier version called open_month in process, so removing the
+        # guard wedged the runner instead of failing it — in the one test
+        # named for not hanging.
+        self._real_month()
+        path = self.journal / "2026-09.jsonl"
+        path.write_text("{}\n", encoding="utf-8")
+        # Compared by name: the home is reached through /var, which resolves
+        # to /private/var, so the paths differ while naming one file.
+        named = [entry.name for entry in journal.month_files(self.home)]
+        self.assertIn(path.name, named)
+
+        path.unlink()
+        os.mkfifo(path)
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys;"
+                "sys.path.insert(0, sys.argv[1]);"
+                "from pathlib import Path;"
+                "from agent_harness import journal;"
+                "print(journal.open_month(Path(sys.argv[2])) is None)",
+                str(REPOSITORY),
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("True", result.stdout.strip())
+
+    def test_every_reporting_command_finishes_with_a_fifo_present(self) -> None:
+        self._real_month()
+        os.mkfifo(self.journal / "2026-09.jsonl")
+        workspace = self.home / "work"
+        workspace.mkdir()
+
+        for command in ("doctor", "conformance", "effectiveness"):
+            with self.subTest(command=command):
+                result = subprocess.run(
+                    [sys.executable, str(REPOSITORY / "scripts/graphctl.py"), command],
+                    cwd=workspace,
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    env={**os.environ, "GRAPH_HARNESS_HOME": str(self.home)},
+                )
+                self.assertEqual(0, result.returncode, result.stderr)

@@ -51,11 +51,14 @@ the runtime probe.
   produces an edit record. Such sessions are `unattributed`, never `read_only`.
   The remedy is another direct signal — a `Bash` `PostToolUse` event — not
   another inference. Deliberately not built.
-- **A month file that is a FIFO or a device symlink hangs the reporting
-  commands.** The write path guards against link-like paths; the read path has
-  no equivalent regular-file check. It needs write access to the journal
-  directory, which the threat model already concedes, but it is a one-line fix
-  worth making.
+- ~~A month file that is a FIFO or a device symlink hangs the reporting
+  commands.~~ **Closed.** `open_month` decides the file type from the
+  descriptor it already holds, opened `O_NOFOLLOW | O_NONBLOCK`, so a FIFO
+  returns rather than blocks and anything that is not a regular file is closed
+  unread. Deciding from a separate `stat` first was tried and rejected: a
+  writer racing the window between the check and the open hung three reads in
+  forty, and the check itself, called outside its guard, turned one unreadable
+  month into a lost history.
 - **Edits outside the repository count toward the thresholds**, hashed whole and
   attributed to the project, so heavy scratchpad use inflates a session's size.
 - **The journal is forgeable and is not an audit trail.** Anyone who can write
