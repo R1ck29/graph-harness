@@ -129,6 +129,7 @@ def _judge(state: dict[str, Any]) -> dict[str, Any]:
         "transitions": state["transitions"],
         "changed_files": 0,
         "edits": 0,
+        "outside_edits": 0,
         "confidence": LOW,
     }
     if opened is None:
@@ -142,6 +143,12 @@ def _judge(state: dict[str, Any]) -> dict[str, Any]:
     files, calls = session_hooks.session_size(state["records"])
     verdict["changed_files"] = files
     verdict["edits"] = calls
+    # Reported beside the project's own, never folded into it: a session that
+    # wrote only to a scratchpad has not touched this repository, and saying
+    # so is more useful than either counting it or hiding it.
+    verdict["outside_edits"] = len(
+        session_hooks.edits(state["records"], include_outside=True)
+    ) - len(session_hooks.edits(state["records"]))
     verdict["confidence"] = HIGH if state["closed"] else MEDIUM
     # The tree is reported as context and decides nothing. Both counts below
     # come from the snapshots, and no branch here reads them.
@@ -239,6 +246,7 @@ def _codex_verdicts(home: str | os.PathLike[str] | None = None) -> list[dict[str
             "transitions": 0,
             "changed_files": 0,
             "edits": 0,
+            "outside_edits": 0,
             "confidence": LOW,
             "contested": False,
             "verdict": "bypass_suspected",

@@ -122,7 +122,8 @@ rate counts only `conformant` and `bypass`: a session nothing can attribute says
 nothing about whether the protocol was followed.
 
 `changed_files` is the number of distinct `path_id` values the session recorded
-and `edits` is how many editing tool calls it made. Both come from edit records
+inside the repository and `edits` is how many editing tool calls it made there;
+`outside_edits` counts the rest. Both come from edit records
 alone, so committing the work afterwards, or a dirty tree inherited from
 before, cannot move either number.
 

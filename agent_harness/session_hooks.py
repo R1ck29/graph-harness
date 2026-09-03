@@ -110,24 +110,28 @@ def repository(payload: dict[str, Any], fast: bool = False) -> Path:
     return Path(derive())
 
 
-def path_id(repo: str | os.PathLike[str], path: str) -> str:
-    """Return a stable, non-reversible identifier for one edited path.
+def path_id(repo: str | os.PathLike[str], path: str) -> tuple[str, bool]:
+    """Identify one edited path, and say whether it lies outside *repo*.
 
     Relative to the repository so the same file yields one value however the
     client named it, and hashed so the journal can count distinct files
     without holding anything that says which files they were.
+
+    A path outside the repository is still recorded — a session that edited
+    something has edited something — but it is flagged, because it is not
+    work on *this* project. Counting a scratchpad or a note in a home
+    directory toward the project's thresholds made heavy scratchpad use read
+    as unrecorded work on the repository, which is an accusation the evidence
+    does not support.
     """
 
+    outside = False
     try:
         relative = str(Path(path).resolve().relative_to(Path(repo).resolve()))
     except (OSError, ValueError):
-        # A path outside the repository is still one distinct file. It is
-        # hashed whole rather than dropped, because a session that edits
-        # outside the project has still edited something.
-        relative = str(path)
-    return hashlib.sha256(relative.encode("utf-8", "replace")).hexdigest()[
-        :PATH_ID_CHARACTERS
-    ]
+        relative, outside = str(path), True
+    digest = hashlib.sha256(relative.encode("utf-8", "replace")).hexdigest()
+    return digest[:PATH_ID_CHARACTERS], outside
 
 
 def record_edit() -> int:
@@ -168,6 +172,7 @@ def record_edit() -> int:
         return 0
     try:
         root = repository(payload, fast=True)
+        identifier, outside = path_id(root, named)
         journal.append(
             journal.record(
                 "edit",
@@ -175,7 +180,10 @@ def record_edit() -> int:
                 session_id=payload.get("session_id"),
                 repo=str(root),
                 tool=tool,
-                path_id=path_id(root, named),
+                path_id=identifier,
+                # Recorded only when true, so an ordinary edit keeps the
+                # record it always had and no reader has to know the flag.
+                outside=True if outside else None,
             )
         )
     except Exception:  # noqa: BLE001 - a lost record must not break an edit
@@ -211,8 +219,17 @@ def observation_sound(records: list[dict[str, Any]]) -> bool:
     return any(record.get("event") == "session_open" for record in records)
 
 
-def edits(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [record for record in records if record.get("event") == "edit"]
+def edits(
+    records: list[dict[str, Any]], include_outside: bool = False
+) -> list[dict[str, Any]]:
+    """Return this session's edit records, by default only the project's own."""
+
+    return [
+        record
+        for record in records
+        if record.get("event") == "edit"
+        and (include_outside or not record.get("outside"))
+    ]
 
 
 def edited(records: list[dict[str, Any]]) -> bool:

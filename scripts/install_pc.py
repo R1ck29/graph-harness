@@ -155,15 +155,24 @@ def _without_managed_hooks(
 
 
 def _is_managed_hook(entry: Any, managed_commands: set[str]) -> bool:
-    """Recognize only the exact exec-form hook or its legacy shell-form shape."""
+    """Recognize our own hook entry by the command it runs, and nothing else.
+
+    The command is an absolute path into the runtime this installer built, so
+    it identifies the entry on its own. Matching on the timeout and the
+    argument list as well was stricter and worse: a person who raised the
+    timeout, or added an argument, made our entry unrecognisable, so the next
+    install appended a second one and the hook ran twice for every edit.
+    Recognising the entry means a repeated install *replaces* it, which is
+    also what makes the drift check able to see a hand edit at all.
+
+    Nothing here loosens the boundary around other people's entries. A
+    command equal to one of ours is one of ours: it names a path only this
+    installer writes.
+    """
 
     if not isinstance(entry, dict):
         return False
-    if entry.get("type") != "command" or entry.get("command") not in managed_commands:
-        return False
-    if entry.get("timeout") != 10:
-        return False
-    return "args" not in entry or entry.get("args") == []
+    return entry.get("type") == "command" and entry.get("command") in managed_commands
 
 
 def _with_managed_hooks(

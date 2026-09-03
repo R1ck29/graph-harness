@@ -101,6 +101,10 @@ session touched and identifies none of them. Nothing in the payload a client
 sends — the edit's old text, its new text, the file's contents — is read or
 stored.
 
+An edit outside the repository adds one boolean, `outside: true`, and nothing
+else — the identifier stays a hash of the whole path, so the record says that
+*somewhere else* was written without saying where.
+
 The same rule governs the working-tree snapshot beside it, which records a
 digest, counts, and `HEAD`, and no path.
 

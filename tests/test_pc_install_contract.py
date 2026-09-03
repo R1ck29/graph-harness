@@ -200,6 +200,90 @@ class PcInstallContractTests(unittest.TestCase):
 
         self.assertEqual(original, self._settings())
 
+    def _edit_managed_entry(self, **changes: Any) -> None:
+        """Modify our own PostToolUse entry the way a curious user would."""
+
+        path = self.claude / "settings.json"
+        document = json.loads(path.read_text(encoding="utf-8"))
+        for matcher in document["hooks"]["PostToolUse"]:
+            for hook in matcher.get("hooks", []):
+                if Path(str(hook.get("command"))).stem == "graphctl-edit":
+                    hook.update(changes)
+        path.write_text(
+            json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+
+    def _managed_edit_entries(self) -> list[Any]:
+        return [
+            hook
+            for matcher in self._settings()["hooks"].get("PostToolUse", [])
+            for hook in matcher.get("hooks", [])
+            if Path(str(hook.get("command"))).stem == "graphctl-edit"
+        ]
+
+    def test_a_user_edited_managed_entry_is_replaced_not_duplicated(self) -> None:
+        # Recognition keyed on the timeout and the args as well as the
+        # command, so raising the timeout made our own entry unrecognisable
+        # and the next install appended a second one. PostToolUse fires on
+        # every edit, so the duplicate is paid on every edit.
+        self._install()
+
+        for change in (
+            {"timeout": 30},
+            {"args": ["--verbose"]},
+            {"timeout": 5, "args": ["--x"]},
+            {"note": "left by a person"},
+        ):
+            with self.subTest(change=change):
+                self._edit_managed_entry(**change)
+                self._install()
+
+                self.assertEqual(1, len(self._managed_edit_entries()), change)
+
+    def test_a_user_edited_managed_entry_is_reported_as_drift(self) -> None:
+        self._install()
+        self._edit_managed_entry(timeout=30)
+
+        drifted = self._run("--check")
+
+        self.assertEqual(2, drifted.returncode)
+        self.assertIn("hook drift", drifted.stderr)
+
+    def test_a_third_party_entry_sharing_our_matcher_survives(self) -> None:
+        self.claude.mkdir(parents=True, exist_ok=True)
+        foreign = {
+            "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+            "hooks": [{"type": "command", "command": "someone-elses-tool"}],
+        }
+        (self.claude / "settings.json").write_text(
+            json.dumps({"hooks": {"PostToolUse": [foreign]}}, indent=2, sort_keys=True)
+            + "\n",
+            encoding="utf-8",
+        )
+
+        self._install()
+        self._edit_managed_entry(timeout=30)
+        self._install()
+
+        entries = self._settings()["hooks"]["PostToolUse"]
+        self.assertIn("someone-elses-tool", json.dumps(entries))
+        self.assertEqual(1, len(self._managed_edit_entries()))
+
+        self._run("--uninstall")
+
+        self.assertEqual({"hooks": {"PostToolUse": [foreign]}}, self._settings())
+
+    def test_every_managed_event_holds_one_entry_after_an_edit_and_reinstall(
+        self,
+    ) -> None:
+        self._install()
+        self._edit_managed_entry(timeout=30)
+        self._install()
+
+        for document in (self._settings(), self._codex_hooks()):
+            for event, commands in self._managed_events(document).items():
+                self.assertEqual(1, len(commands), f"{event}: {commands}")
+
     def test_check_reports_drift_for_a_removed_edit_hook(self) -> None:
         self._install()
         document = self._settings()

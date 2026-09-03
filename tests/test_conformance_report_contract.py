@@ -138,6 +138,75 @@ class ConformanceReportTests(unittest.TestCase):
 
         self.assertEqual({"degraded": "bypass"}, self._verdicts(self._report()))
 
+    def test_edits_outside_the_repository_are_reported_apart_from_its_own(
+        self,
+    ) -> None:
+        self._append(
+            "session_open",
+            client="claude",
+            session_id="mixed",
+            repo="/repo",
+            snapshot=self._snapshot("before"),
+        )
+        for index in range(2):
+            self._append(
+                "edit",
+                client="claude",
+                session_id="mixed",
+                repo="/repo",
+                tool="Edit",
+                path_id=f"in{index:010x}",
+            )
+        for index in range(5):
+            self._append(
+                "edit",
+                client="claude",
+                session_id="mixed",
+                repo="/repo",
+                tool="Edit",
+                path_id=f"out{index:09x}",
+                outside=True,
+            )
+        self._append(
+            "session_close",
+            client="claude",
+            session_id="mixed",
+            repo="/repo",
+            snapshot=self._snapshot("after"),
+        )
+
+        found = [
+            item for item in self._report()["sessions"] if item["session_id"] == "mixed"
+        ][0]
+
+        self.assertEqual("bypass", found["verdict"])
+        self.assertEqual(2, found["changed_files"])
+        self.assertEqual(2, found["edits"])
+        self.assertEqual(5, found["outside_edits"])
+
+    def test_a_session_that_only_edited_outside_is_unattributed(self) -> None:
+        self._session("scratchy", edits=0)
+        for index in range(6):
+            self._append(
+                "edit",
+                client="claude",
+                session_id="scratchy",
+                repo="/repo",
+                tool="Edit",
+                path_id=f"{index:012x}",
+                outside=True,
+            )
+
+        found = [
+            item
+            for item in self._report()["sessions"]
+            if item["session_id"] == "scratchy"
+        ][0]
+
+        self.assertEqual("unattributed", found["verdict"])
+        self.assertEqual(0, found["edits"])
+        self.assertEqual(6, found["outside_edits"])
+
     def test_a_rate_counts_only_sessions_that_could_be_judged(self) -> None:
         self._session("unattributed")
         self._session("incomplete", close=False)

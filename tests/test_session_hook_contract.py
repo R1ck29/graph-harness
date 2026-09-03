@@ -1044,13 +1044,17 @@ class SessionHookTests(unittest.TestCase):
         self.assertNotIn("clients", text)
 
     def test_the_same_path_hashes_the_same_and_a_different_one_does_not(self) -> None:
-        first = session_hooks.path_id(self.repo, str(self.repo / "a.py"))
-        again = session_hooks.path_id(self.repo, str(self.repo / "a.py"))
-        other = session_hooks.path_id(self.repo, str(self.repo / "b.py"))
+        first, first_outside = session_hooks.path_id(self.repo, str(self.repo / "a.py"))
+        again, _ = session_hooks.path_id(self.repo, str(self.repo / "a.py"))
+        other, _ = session_hooks.path_id(self.repo, str(self.repo / "b.py"))
+        away, away_outside = session_hooks.path_id(self.repo, "/etc/hosts")
 
         self.assertEqual(first, again)
         self.assertNotEqual(first, other)
         self.assertRegex(first, r"^[0-9a-f]{12}$")
+        self.assertFalse(first_outside)
+        self.assertTrue(away_outside)
+        self.assertRegex(away, r"^[0-9a-f]{12}$")
 
     def test_a_path_outside_the_repository_is_recorded_without_the_path(self) -> None:
         with mock.patch(
@@ -1093,6 +1097,70 @@ class SessionHookTests(unittest.TestCase):
         self.assertEqual("NotebookEdit", recorded[0]["tool"])
         self.assertRegex(recorded[0]["path_id"], r"^[0-9a-f]{12}$")
         self.assertNotIn("study", self._journal_text())
+
+    def test_an_edit_outside_the_repository_is_flagged_as_outside(self) -> None:
+        # A session that writes to a scratchpad has not touched the project.
+        # Counting those edits toward the project's thresholds made heavy
+        # scratchpad use look like unrecorded work on the repository.
+        outside = Path(self._directory.name) / "scratch.md"
+        payload = self._edit_payload("O1", "Edit", str(outside))
+
+        with mock.patch("sys.stdin", io.StringIO(payload)):
+            self.assertEqual(0, session_hooks.record_edit())
+
+        recorded = self._edits()
+        self.assertEqual(1, len(recorded))
+        self.assertTrue(recorded[0]["outside"])
+        self.assertRegex(recorded[0]["path_id"], r"^[0-9a-f]{12}$")
+        self.assertNotIn("scratch", self._journal_text())
+
+    def test_an_edit_inside_the_repository_carries_no_outside_flag(self) -> None:
+        payload = self._edit_payload("I1", "Edit", str(self.repo / "a.py"))
+
+        with mock.patch("sys.stdin", io.StringIO(payload)):
+            session_hooks.record_edit()
+
+        recorded = self._edits()
+        self.assertEqual(1, len(recorded))
+        self.assertNotIn("outside", recorded[0])
+
+    def test_outside_edits_do_not_count_toward_the_thresholds(self) -> None:
+        # Annotated because the literal mixes an edit record with a boundary
+        # record carrying a nested snapshot, and mypy otherwise joins the
+        # element type to object. CI type-checks tests/ as well as the
+        # package, so an unannotated literal here fails the static job.
+        records: list[dict[str, Any]] = [
+            {"event": "edit", "session_id": "s", "path_id": "aa", "outside": True},
+            {"event": "edit", "session_id": "s", "path_id": "bb", "outside": True},
+            {"event": "edit", "session_id": "s", "path_id": "cc", "outside": True},
+            {"event": "edit", "session_id": "s", "path_id": "dd", "outside": True},
+            {"event": "edit", "session_id": "s", "path_id": "ee", "outside": True},
+            {"event": "edit", "session_id": "s", "path_id": "ff", "outside": True},
+            {"event": "session_open", "snapshot": {"git": True}},
+        ]
+
+        self.assertEqual((0, 0), session_hooks.session_size(records))
+        self.assertFalse(session_hooks.edited(records))
+        self.assertEqual((False, 0, 0), session_hooks.worth_reporting(records))
+
+    def test_a_session_that_only_edited_outside_is_not_reported(self) -> None:
+        self._start()
+        outside = Path(self._directory.name) / "elsewhere"
+        outside.mkdir()
+        for index in range(6):
+            # _edit_payload already returns JSON; encoding it again made
+            # read_payload see a string rather than an object, so nothing was
+            # recorded and the test passed by doing nothing.
+            payload = self._edit_payload("s1", "Edit", str(outside / f"note{index}.md"))
+            with mock.patch("sys.stdin", io.StringIO(payload)):
+                session_hooks.record_edit()
+        self._end()
+
+        with mock.patch("sys.stderr", io.StringIO()) as reported:
+            outcome = self._start(self._payload(session_id="s2"))
+
+        self.assertEqual(0, outcome)
+        self.assertEqual("", reported.getvalue())
 
     def test_an_edit_that_cannot_be_recorded_still_exits_zero(self) -> None:
         payload = self._edit_payload("E3", "Edit", str(self.repo / "a.py"))
