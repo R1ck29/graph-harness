@@ -10,6 +10,13 @@ permissions:
 jobs:
   test:
     strategy:
+      # Let every leg finish. With fail-fast on, the first failing cell
+      # cancels its siblings mid-run, so their unittest summary never
+      # prints — a Windows failure cancelled the other Windows leg and both
+      # reported only `... FAIL` lines with no assertion text, which is the
+      # one thing needed to fix a platform-specific failure from a machine
+      # that is not that platform.
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         python: ["3.10", "3.13"]
