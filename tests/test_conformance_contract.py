@@ -718,6 +718,19 @@ class BrokenInstallationTests(unittest.TestCase):
             with self.subTest(command=command[0]):
                 self.assertEqual(0, cli.main(command), command)
 
+    def test_the_broken_install_is_named_rather_than_left_to_an_errno(self) -> None:
+        # The warning must not depend on the filesystem raising. A regular
+        # file where the install root belongs raises NotADirectoryError on
+        # POSIX and raises nothing on Windows, where the glob simply yields
+        # nothing — so the same broken install warned on one platform and
+        # looked healthy on the other, which is exactly what doctor exists
+        # to prevent. The check now names the offending path itself.
+        report = cli._journal_diagnostics()
+
+        self.assertEqual(1, len(report["warnings"]))
+        self.assertIn("is not a directory", report["warnings"][0])
+        self.assertIn("graph-engineering-agent-harness", report["warnings"][0])
+
     def test_doctor_names_the_broken_journal_rather_than_raising(self) -> None:
         report = cli._journal_diagnostics()
 

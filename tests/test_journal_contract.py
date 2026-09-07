@@ -68,7 +68,18 @@ class RepositoryKeyTests(unittest.TestCase):
         # Every caller records rather than acts, so a key that cannot be
         # derived must degrade here rather than rely on each of them wrapping
         # the call. An embedded null byte is rejected before git sees it.
-        self.assertEqual("/tmp/a\x00b", repository_key("/tmp/a\x00b"))
+        #
+        # Compared against the platform's own rendering of the path, not
+        # against the POSIX spelling. The contract is that the call degrades
+        # instead of raising; the separator it comes back with is incidental,
+        # and asserting the input verbatim failed on Windows, where the same
+        # path renders with backslashes.
+        value = "/tmp/a\x00b"
+
+        derived = repository_key(value)
+
+        self.assertEqual(str(Path(value)), derived)
+        self.assertIn("\x00", derived)
 
     def test_a_subdirectory_and_the_root_share_one_key(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

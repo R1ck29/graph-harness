@@ -162,10 +162,18 @@ class PcInstallContractTests(unittest.TestCase):
         self._install()
 
         for document in (self._settings(), self._codex_hooks()):
+            # Walked, not string-matched against the serialised form.
+            # `str(self.edit_hook) in json.dumps(matcher)` passes on POSIX
+            # and can never pass on Windows, where the path's backslashes
+            # are escaped as `\\` in the JSON text and the raw path is
+            # therefore not a substring of it.
             entries = [
                 matcher
                 for matcher in document["hooks"]["PostToolUse"]
-                if str(self.edit_hook) in json.dumps(matcher)
+                if any(
+                    hook.get("command") == str(self.edit_hook)
+                    for hook in matcher.get("hooks", [])
+                )
             ]
             self.assertEqual(1, len(entries), document)
             self.assertEqual(

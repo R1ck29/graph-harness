@@ -11,7 +11,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Sequence
 
-from . import conformance, journal
+from . import conformance, journal, paths
 from .errors import HarnessError
 from .graph import Graph
 from .paths import repository_key, user_data_path, workspace_path
@@ -206,6 +206,28 @@ def _runtime_diagnostics() -> dict[str, Any]:
     return report
 
 
+def _blocking_ancestor() -> Path | None:
+    """Return the first path on the way to the journal that is not a directory.
+
+    Answered without resolving anything, because resolving is what raises on
+    POSIX and what silently succeeds on Windows.
+    """
+
+    try:
+        root = (
+            paths.selected_home() / paths.INSTALL_DIRECTORY / journal.JOURNAL_DIRECTORY
+        )
+    except (HarnessError, OSError):
+        return None
+    for parent in (root, *root.parents):
+        try:
+            if parent.exists() and not parent.is_dir():
+                return parent
+        except OSError:
+            return None
+    return None
+
+
 def _journal_diagnostics() -> dict[str, Any]:
     """Report what the journal has actually observed, per client.
 
@@ -228,6 +250,20 @@ def _journal_diagnostics() -> dict[str, Any]:
     # with these calls inline left an OSError to escape when the journal path
     # was a regular file rather than a directory, and doctor exited 2 with a
     # raw errno where conformance and effectiveness both survived.
+    # Named before anything resolves it, and identically on every platform.
+    # A regular file where a directory belongs raises NotADirectoryError out
+    # of the path walk on POSIX and raises nothing at all on Windows, where
+    # the glob simply yields no months — so the same broken install reported
+    # a warning on one platform and looked perfectly healthy on the other,
+    # which is the one thing doctor exists to prevent. Reporting the errno
+    # was also the weaker message: it named the leaf the caller asked for
+    # rather than the ancestor that is actually wrong.
+    blocking = _blocking_ancestor()
+    if blocking is not None:
+        report["warnings"].append(
+            f"The journal directory is unusable: {blocking} is not a directory"
+        )
+        return report
     try:
         report["journal_path"] = str(journal.journal_directory())
         report["journal_bytes"] = journal.total_bytes()
