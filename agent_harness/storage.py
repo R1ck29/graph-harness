@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import stat
 import tempfile
 import time
@@ -42,7 +43,15 @@ class FileLock:
                     raise HarnessError(
                         f"timed out waiting for lock: {self.path}"
                     ) from exc
-                time.sleep(0.05)
+                # Jittered, because a fixed interval starves a waiter. Every
+                # contender slept exactly 50ms and so woke together to race
+                # for the same create, and nothing made the loser more likely
+                # to win next time: with eight processes appending to one
+                # journal on Windows, one of them lost often enough to
+                # exhaust the timeout and drop a record. The record was then
+                # discarded silently, because an observation layer that
+                # raises would cost more than the observation is worth.
+                time.sleep(0.01 + random.random() * 0.06)
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
         if self._fd is not None:

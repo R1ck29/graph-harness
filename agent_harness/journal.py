@@ -192,7 +192,11 @@ def _serialized(path: Path) -> Iterator[None]:
         return
     from .storage import FileLock
 
-    with FileLock(path.with_name(path.name + ".lock")):
+    # A longer wait than the default: this lock is held for one small
+    # write, so a contender that cannot get in within seconds is queueing
+    # behind many short holds rather than one long one, and dropping the
+    # record is the worst available answer.
+    with FileLock(path.with_name(path.name + ".lock"), timeout=30.0):
         yield
 
 
