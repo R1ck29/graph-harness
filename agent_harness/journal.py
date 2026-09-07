@@ -303,7 +303,8 @@ def open_month(path: Path) -> "TextIO | None":
     unreadable for the doctor command the recovery procedure depends on.
     """
 
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    non_blocking = getattr(os, "O_NONBLOCK", 0)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | non_blocking
     try:
         descriptor = os.open(path, flags)
     except OSError:
@@ -312,11 +313,17 @@ def open_month(path: Path) -> "TextIO | None":
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             os.close(descriptor)
             return None
-        if hasattr(os, "set_blocking"):
-            # Named for the call it protects. It guarded a different symbol
-            # before, which is true of this platform but would have escaped
-            # the OSError handler below as an AttributeError if it ever were
-            # not.
+        if non_blocking:
+            # Cleared only where it was set. Guarding on `hasattr(os,
+            # "set_blocking")` instead was wrong in a way that hid for
+            # months: Windows has no O_NONBLOCK, so there is nothing to
+            # clear, but it grew `os.set_blocking` in 3.12 — so on Windows
+            # 3.13 the attribute existed, the call failed on a regular file
+            # descriptor, the OSError handler below swallowed it, and every
+            # month read as unreadable. `journal.read` returned nothing and
+            # roughly seventy tests failed on that one leg while the same
+            # code passed on Windows 3.10, which has no `os.set_blocking`
+            # and so skipped the call entirely.
             os.set_blocking(descriptor, True)
         return os.fdopen(descriptor, "r", encoding="utf-8", errors="replace")
     except OSError:

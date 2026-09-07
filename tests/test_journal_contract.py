@@ -550,6 +550,32 @@ class JournalReadGuardTests(unittest.TestCase):
 
         self.assertIsNone(journal.open_month(link))
 
+    def test_a_platform_without_o_nonblock_still_reads_its_months(self) -> None:
+        # The condition on Windows 3.13, reproduced here because no local
+        # machine has it. Windows has no O_NONBLOCK, so nothing is ever set
+        # and there is nothing to clear -- but it grew `os.set_blocking` in
+        # 3.12, so a `hasattr` guard passed, the call failed on a regular
+        # file descriptor, and the OSError handler swallowed it. Every month
+        # came back unreadable, `read` returned nothing, and roughly seventy
+        # tests failed on that one CI leg while Windows 3.10 passed, having
+        # no `os.set_blocking` to call.
+        self._real_month()
+        month = self.journal / "2026-08.jsonl"
+        self.assertTrue(month.is_file(), "the fixture month was not written")
+
+        with mock.patch.multiple(
+            os,
+            O_NONBLOCK=0,
+            set_blocking=mock.Mock(side_effect=OSError(22, "Invalid argument")),
+            create=True,
+        ):
+            handle = journal.open_month(month)
+
+        self.assertIsNotNone(handle, "the month was lost where nothing was set")
+        if handle is not None:
+            handle.close()
+        self.assertEqual(1, len(self._read_within()))
+
     def test_an_unreadable_month_does_not_blind_the_rest(self) -> None:
         self._real_month()
         blocked = self.journal / "2026-09.jsonl"
