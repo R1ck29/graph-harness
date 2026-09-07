@@ -13,6 +13,7 @@ from unittest import mock
 
 from agent_harness import cli, codex_sessions, journal
 from agent_harness.errors import HarnessError
+from tests import workspace_root
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 GRAPHCTL = REPOSITORY / "scripts" / "graphctl.py"
@@ -24,7 +25,7 @@ class TransitionJournalTests(unittest.TestCase):
     def setUp(self) -> None:
         self._home = tempfile.TemporaryDirectory()
         self.addCleanup(self._home.cleanup)
-        self._workspace = tempfile.TemporaryDirectory(dir=REPOSITORY)
+        self._workspace = tempfile.TemporaryDirectory(dir=workspace_root())
         self.addCleanup(self._workspace.cleanup)
         self.home = self._home.name
         self.graph = Path(self._workspace.name) / "task-graph.json"
@@ -211,7 +212,7 @@ class DoctorDiagnosticsTests(unittest.TestCase):
     def setUp(self) -> None:
         self._home = tempfile.TemporaryDirectory()
         self.addCleanup(self._home.cleanup)
-        self._workspace = tempfile.TemporaryDirectory(dir=REPOSITORY)
+        self._workspace = tempfile.TemporaryDirectory(dir=workspace_root())
         self.addCleanup(self._workspace.cleanup)
         self.home = self._home.name
         self.graph = Path(self._workspace.name) / "task-graph.json"
@@ -602,7 +603,7 @@ class EscapeHatchTransitionTests(unittest.TestCase):
     def setUp(self) -> None:
         self._home = tempfile.TemporaryDirectory()
         self.addCleanup(self._home.cleanup)
-        self._workspace = tempfile.TemporaryDirectory(dir=REPOSITORY)
+        self._workspace = tempfile.TemporaryDirectory(dir=workspace_root())
         self.addCleanup(self._workspace.cleanup)
         self.home = Path(self._home.name)
         self.workspace = Path(self._workspace.name)

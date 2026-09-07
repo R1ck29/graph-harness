@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from tests import workspace_root
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 GRAPHCTL = REPOSITORY / "scripts" / "graphctl.py"
@@ -41,7 +42,7 @@ class QuickStartContractTests(unittest.TestCase):
         self.assertIn("from agent_harness.cli import main", script)
 
     def test_source_cli_completes_the_documented_quickstart(self) -> None:
-        with tempfile.TemporaryDirectory(dir=REPOSITORY) as directory:
+        with tempfile.TemporaryDirectory(dir=workspace_root()) as directory:
             workspace = Path(directory)
             copied_examples = workspace / "examples" / "quickstart"
             copied_examples.parent.mkdir()

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_harness import conformance, journal
+from tests import workspace_root
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 GRAPHCTL = REPOSITORY / "scripts" / "graphctl.py"
@@ -433,7 +434,7 @@ class ConformanceReportTests(unittest.TestCase):
         )
 
     def test_the_command_leaves_the_graph_alone(self) -> None:
-        with tempfile.TemporaryDirectory(dir=REPOSITORY) as workspace:
+        with tempfile.TemporaryDirectory(dir=workspace_root()) as workspace:
             graph = Path(workspace) / "task-graph.json"
             environment = dict(os.environ)
             environment["GRAPH_HARNESS_HOME"] = self.home

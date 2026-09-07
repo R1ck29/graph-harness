@@ -17,6 +17,7 @@ from unittest import mock
 from agent_harness.evals import load_cases, run_suite
 from agent_harness.errors import HarnessError
 from agent_harness.paths import is_link_like
+from tests import workspace_root
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 SYNC = REPOSITORY / "scripts" / "sync_adapters.py"
@@ -139,7 +140,7 @@ class EvaluationFixtureTests(unittest.TestCase):
             self.assertFalse(output.exists())
 
     def test_eval_runner_rejects_symlink_output(self) -> None:
-        with tempfile.TemporaryDirectory(dir=REPOSITORY) as directory:
+        with tempfile.TemporaryDirectory(dir=workspace_root()) as directory:
             root = Path(directory)
             target = root / "target.json"
             target.write_text("preserve me", encoding="utf-8")
@@ -161,7 +162,7 @@ class EvaluationFixtureTests(unittest.TestCase):
             self.assertEqual("preserve me", target.read_text(encoding="utf-8"))
 
     def test_eval_runner_rejects_output_through_windows_junction(self) -> None:
-        with tempfile.TemporaryDirectory(dir=REPOSITORY) as workspace_directory:
+        with tempfile.TemporaryDirectory(dir=workspace_root()) as workspace_directory:
             with tempfile.TemporaryDirectory() as outside_directory:
                 junction = Path(workspace_directory) / "junction"
                 outside = Path(outside_directory)
