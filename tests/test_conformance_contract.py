@@ -559,7 +559,14 @@ class CodexSessionReaderTests(unittest.TestCase):
             with self.subTest(directory=awkward):
                 root = Path(self._directory.name) / awkward
                 codex = root / ".codex"
-                codex.mkdir(parents=True)
+                try:
+                    codex.mkdir(parents=True)
+                except OSError as exc:  # pragma: no cover - platform dependent
+                    # Windows forbids ? in a filename, so the directory
+                    # cannot exist there to be tested. The defect this
+                    # guards is URI truncation inside SQLite, which is not
+                    # Windows-specific; only the fixture is.
+                    self.skipTest(f"{awkward!r} is not a legal name here: {exc}")
                 path = codex / "state_1.sqlite"
                 connection = sqlite3.connect(path)
                 with connection:
