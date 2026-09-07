@@ -53,6 +53,15 @@ def _git(repo: Path, *arguments: str, deadline: float | None = None) -> str | No
             ("git", "-C", str(repo), *arguments),
             capture_output=True,
             text=True,
+            # Named, not inherited. `text=True` alone decodes with the
+            # locale's preferred encoding, and git emits paths as UTF-8
+            # bytes on every platform. On Windows the locale is typically
+            # cp1252 or cp932, so a file whose name is not ASCII came back
+            # mojibake, `repo / path` then named a file that does not
+            # exist, its contents were never hashed, and an edit to it was
+            # invisible to the snapshot.
+            encoding="utf-8",
+            errors="replace",
             timeout=remaining,
             check=False,
         )
