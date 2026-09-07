@@ -38,11 +38,18 @@ class FileLock:
                 self._identity = (info.st_dev, info.st_ino)
                 os.write(self._fd, f"{os.getpid()}\n".encode("ascii"))
                 return self
-            except FileExistsError as exc:
+            except (FileExistsError, PermissionError) as exc:
                 if time.monotonic() >= deadline:
                     raise HarnessError(
                         f"timed out waiting for lock: {self.path}"
                     ) from exc
+                # PermissionError as well as FileExistsError: on Windows,
+                # creating the lock while its previous holder is unlinking it
+                # raises access-denied rather than exists, and that escaped
+                # the retry entirely. `journal.append` then caught it as an
+                # OSError and dropped the record, which is how eight
+                # concurrent writers lost lines there and nowhere else.
+                #
                 # Jittered, because a fixed interval starves a waiter. Every
                 # contender slept exactly 50ms and so woke together to race
                 # for the same create, and nothing made the loser more likely
