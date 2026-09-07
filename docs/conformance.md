@@ -83,10 +83,32 @@ the truth. Sessions recorded before the edit hook existed read as
 `edit_hook_last_seen` so a client with no edit hook installed is visible rather
 than silently unattributed.
 
-The remedy, if this gap is worth closing, is another direct signal rather than
-another inference: a `Bash` `PostToolUse` event would say that this session's
-agent ran a shell command, which is the same kind of evidence `Edit` gives.
-That is not built here.
+The obvious remedy is another direct signal rather than another inference: a
+`Bash` `PostToolUse` event saying that this session's agent ran a shell
+command. **That was built, reviewed, and removed.** It is not here, and the
+reason it is not is worth writing down, because the design reads as sound
+until it is driven end to end.
+
+A shell record carries no path — deliberately, since the command text is the
+one thing that must never reach the journal. So the record can say a
+write-shaped command ran, and the tree can say something changed, but nothing
+connects the two. Pairing them credits the session with whatever moved the
+tree in that turn. Driven end to end, an agent running `mkdir -p` on a
+directory *outside* the repository, while a colleague saved two files from
+another terminal, was reported as a bypass of two files — having written
+nothing inside the project at all. A conflicted `git pull`, a `git stash pop`
+or a `git apply` each supply the same false movement.
+
+Classifying the command's shape does not rescue it. Deciding whether a
+command writes means parsing shell text, and a classifier that errs towards
+accusation is worse than no signal: `grep` for an arrow, `rg` for a fat
+arrow, and `jq` with a `>` in its filter all look like redirections, and
+`git commit -am "a; b"` splits into a segment that escapes the git exclusion.
+
+Closing this gap needs a signal that says *which* path a command touched —
+hashed paths the command names, checked against the tree delta, or a snapshot
+around each call rather than each turn. Anything weaker is the correlation
+that failed here.
 
 ## Repository identity
 
@@ -202,7 +224,22 @@ Three limits on reading it, all real:
   executor's own assertion, not a verified green run.
 - The counts are only as complete as the graph files handed to them. A round
   abandoned without its archive kept, or an archive not passed on the command
-  line, is simply absent; `graphs_read` says how many were folded in.
+  line, is simply absent; `graphs_read` says how many were folded in, and
+  `unreadable` names every path that was passed and refused, each with the
+  reason it was refused. The two together always account for every path
+  given, so a thin report cannot be mistaken for a complete one, and the
+  reason says whether to fix the file or point somewhere else.
+
+  The reasons, which are every reason the loader can give:
+
+  ```refusals
+  symlink
+  outside_workspace
+  not_a_regular_file
+  too_large
+  unreadable
+  malformed
+  ```
 
 It reads and writes nothing. Each node is counted once however many archives it
 appears in, and **every archive's reviews are kept**: a node re-created by a

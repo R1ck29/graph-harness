@@ -245,8 +245,10 @@ def _journal_diagnostics() -> dict[str, Any]:
     for entry in entries:
         # The edit hook is the only producer that proves PostToolUse fires.
         # A client can record boundaries perfectly and still have no edit
-        # hook installed, in which case the shell term is carrying the whole
-        # signal alone and a reader should know it.
+        # hook installed, in which case nothing can attribute any change to
+        # it and every one of its sessions reads as `unattributed`. A reader
+        # has to be able to tell that apart from a client that genuinely
+        # only read code.
         if entry.get("event") == "edit":
             client = entry.get("client")
             stamp = entry.get("ts")

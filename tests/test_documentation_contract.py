@@ -4,7 +4,14 @@ import re
 import unittest
 from pathlib import Path
 
-from agent_harness import conformance, journal, session_hooks, worktree
+from agent_harness import (
+    conformance,
+    effectiveness,
+    journal,
+    session_hooks,
+    worktree,
+)
+from scripts import install_pc
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 DOCS = REPOSITORY / "docs"
@@ -30,6 +37,98 @@ class DocumentationContractTests(unittest.TestCase):
 
         for event in journal.EVENTS:
             self.assertIn(f"`{event}`", reference, event)
+
+    def test_the_event_table_names_no_event_the_code_cannot_write(self) -> None:
+        # The converse of the test above, and the one that was missing. A
+        # reviewer once found the reference describing a `Bash` event that
+        # had never been built, and nothing failed: the table could gain a
+        # row for a signal that did not exist, because only code-to-docs was
+        # checked. A promise of observation that is not kept is worse than
+        # an admitted blind spot, because a reader stops looking.
+        reference = _read("conformance.md")
+        table = re.findall(r"^\| `([a-z_]+)` \|", reference, flags=re.MULTILINE)
+        self.assertTrue(table, "the event table was not found")
+
+        named = set(table) - set(conformance.VERDICTS)
+        self.assertEqual(set(journal.EVENTS), named)
+
+    def test_no_document_promises_silence_on_a_failed_observation(self) -> None:
+        # how-it-works.md claimed that when the observation failed — no
+        # version control, or a check that timed out — the session was
+        # reported as `unobserved` rather than guessed at. It is not: such a
+        # session is judged on its edit records like any other, so one that
+        # edited and skipped the graph is reported as a bypass. The claim
+        # also contradicted conformance.md, which had it right. A promise of
+        # restraint the code does not practise is the same defect class as a
+        # promise of observation it does not make.
+        state = {
+            "session_id": "s",
+            "client": "claude",
+            "repo": "r",
+            "opened": {"ts": "2026-09-01T00:00:00+00:00", "snapshot": {"git": False}},
+            "ended": {"ts": "2026-09-01T00:01:00+00:00"},
+            "closed": True,
+            "transitions": 0,
+            "records": [
+                {
+                    "event": "edit",
+                    "tool": "Edit",
+                    "path_id": f"{index:012x}",
+                    "outside": False,
+                }
+                for index in range(6)
+            ],
+        }
+
+        judged = conformance._judge(state)
+
+        self.assertEqual("bypass", judged["verdict"])
+        self.assertNotIn("reported as unobserved", _read("how-it-works.md"))
+
+    def test_the_watcher_count_matches_the_installer(self) -> None:
+        # The guide said three watchers where the installer manages four.
+        spelled = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five"}
+
+        managed = len(install_pc.MANAGED_HOOK_EVENTS)
+
+        self.assertIn(f"the same {spelled[managed]} watchers", _read("how-it-works.md"))
+
+    def test_the_reference_lists_exactly_the_refusal_reasons_that_exist(self) -> None:
+        # Read out of one fenced block, not scanned for anywhere in the
+        # document. The first version of this test collected every backticked
+        # lowercase token in the file and then filtered them by membership in
+        # `REFUSALS`, which made the comparison one-directional by
+        # construction: it could only ever check that every reason appears
+        # somewhere, so documenting a reason the code cannot emit passed. It
+        # leaked in the direction it did check, too — deleting `unreadable`
+        # from the list passed, because the same word is backticked five
+        # words earlier as the name of the field the list belongs to.
+        #
+        # A bounded block cannot do either. Whatever is inside it is the
+        # documented set, and the assertion below is a real set equality.
+        reference = _read("conformance.md")
+        # findall, not search: `search` takes the first block, so a second
+        # contradictory one placed below it would go unchecked. Requiring
+        # exactly one closes that and costs a line.
+        blocks = re.findall(r"```refusals\n(.*?)```", reference, flags=re.DOTALL)
+        self.assertEqual(1, len(blocks), "expected exactly one refusals block")
+
+        documented = set(blocks[0].split())
+
+        self.assertEqual(set(effectiveness.REFUSALS), documented)
+
+    def test_the_refusal_names_are_the_ones_the_loader_can_return(self) -> None:
+        # `REFUSALS` is only worth holding documents to if it is itself the
+        # truth. Every `REFUSAL_*` constant must appear in it, so a new
+        # reason cannot be defined and quietly left out of the set the
+        # documentation is checked against.
+        defined = {
+            value
+            for name, value in vars(effectiveness).items()
+            if name.startswith("REFUSAL_") and isinstance(value, str)
+        }
+
+        self.assertEqual(defined, set(effectiveness.REFUSALS))
 
     def test_every_bound_the_reference_names_exists_in_the_code(self) -> None:
         reference = _read("conformance.md")

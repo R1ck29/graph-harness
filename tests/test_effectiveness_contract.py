@@ -11,6 +11,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -66,12 +68,18 @@ class EffectivenessContractTests(unittest.TestCase):
     def setUp(self) -> None:
         self._directory = tempfile.TemporaryDirectory()
         self.addCleanup(self._directory.cleanup)
-        self.home = Path(self._directory.name)
+        self.home = Path(self._directory.name).resolve()
         self._environment = mock.patch.dict(
             os.environ, {"GRAPH_HARNESS_HOME": str(self.home)}
         )
         self._environment.start()
         self.addCleanup(self._environment.stop)
+        # The report confines graph paths to the workspace, so the workspace
+        # is this temporary home. Making one inside the repository instead
+        # would leave a directory behind on every run.
+        previous = os.getcwd()
+        os.chdir(self.home)
+        self.addCleanup(os.chdir, previous)
 
     def _write(self, name: str, document: dict[str, Any]) -> Path:
         path = self.home / name
@@ -281,13 +289,32 @@ class EffectivenessContractTests(unittest.TestCase):
 
         self.assertEqual(1, found["nodes"]["total"])
         # Both the malformed file and the missing one are named, so a
-        # reader can tell a thin report from a complete one.
-        self.assertEqual(2, len(found["unreadable"]))
+        # reader can tell a thin report from a complete one, and each says
+        # which of the two it was — one is fixed by editing the file and the
+        # other by pointing somewhere else.
+        self.assertEqual(
+            [
+                {"path": str(broken), "reason": "malformed"},
+                {"path": str(self.home / "missing.json"), "reason": "unreadable"},
+            ],
+            found["unreadable"],
+        )
 
     def test_this_repository_records_a_defect_review_caught(self) -> None:
         # The claim, measured against the only history there is.
         graphs = sorted(REPOSITORY.glob("task-graph*.json"))
-        self.assertTrue(graphs)
+        if not graphs:
+            # The archives are gitignored working history, not repository
+            # content, so a fresh clone, a CI checkout and a detached
+            # worktree all have none. Asserting they exist failed the suite
+            # for everyone but this machine, which is a defect in the test
+            # rather than a finding about the harness.
+            self.skipTest("no graph archives in this checkout")
+        # These graphs live in the repository, so the repository is the
+        # workspace for this reading of them.
+        previous = os.getcwd()
+        os.chdir(REPOSITORY)
+        self.addCleanup(os.chdir, previous)
 
         found = effectiveness.report(graphs, home=self.home)
 
@@ -303,3 +330,279 @@ class EffectivenessContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReportIntegrityTests(unittest.TestCase):
+    """What the reports refuse, and what they say about themselves."""
+
+    def setUp(self) -> None:
+        self._directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._directory.cleanup)
+        self.home = Path(self._directory.name).resolve()
+        self._environment = mock.patch.dict(
+            os.environ, {"GRAPH_HARNESS_HOME": str(self.home)}
+        )
+        self._environment.start()
+        self.addCleanup(self._environment.stop)
+        self.workspace = self.home / "work"
+        self.workspace.mkdir()
+        previous = os.getcwd()
+        os.chdir(self.workspace)
+        self.addCleanup(os.chdir, previous)
+
+    def _graph(self, name: str, document: dict[str, Any]) -> Path:
+        path = self.workspace / name
+        path.write_text(json.dumps(document), encoding="utf-8")
+        return path
+
+    def test_a_graph_above_the_storage_bound_is_refused_not_read(self) -> None:
+        # The graph store already refuses a file this size; a report that
+        # read one anyway would be the one place the bound does not hold.
+        from agent_harness import storage
+
+        oversized = self.workspace / "task-graph.huge.json"
+        padding = "x" * (storage.MAX_GRAPH_BYTES + 1024)
+        oversized.write_text(
+            json.dumps({"objective": padding, "nodes": []}), encoding="utf-8"
+        )
+        good = self._graph("task-graph.json", graph(node("a")))
+
+        found = effectiveness.report([oversized, good], home=self.home)
+
+        self.assertEqual(1, found["nodes"]["total"])
+        self.assertEqual(1, found["graphs_read"])
+        self.assertEqual(
+            [{"path": str(oversized), "reason": "too_large"}], found["unreadable"]
+        )
+
+    def test_a_graph_outside_the_workspace_is_refused(self) -> None:
+        # Every other subcommand confines its paths to the workspace; a
+        # report that read anywhere on disk would be the exception.
+        outside = self.home / "elsewhere.json"  # a sibling of the workspace
+        outside.write_text(json.dumps(graph(node("a"))), encoding="utf-8")
+        good = self._graph("task-graph.json", graph(node("b")))
+
+        found = effectiveness.report([outside, good], home=self.home)
+
+        self.assertEqual(1, found["nodes"]["total"])
+        self.assertEqual(
+            [{"path": str(outside), "reason": "outside_workspace"}],
+            found["unreadable"],
+        )
+
+    # os.mkfifo does not exist on Windows, and the CI matrix runs there.
+    # The guard the test drives is the same on both, but only POSIX can build
+    # the file that proves it.
+    @unittest.skipIf(os.name == "nt", "POSIX named pipe")
+    def test_a_graph_that_is_not_a_regular_file_cannot_hang_the_report(self) -> None:
+        # A size bound is not a time bound: a FIFO has a size of zero, passes
+        # any byte limit, and then blocks the read for ever. Driven in a
+        # subprocess under a timeout, because this defect hangs and a test
+        # that hangs is not a test.
+        fifo = self.workspace / "task-graph.fifo.json"
+        os.mkfifo(fifo)
+        self._graph("task-graph.json", graph(node("a")))
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(REPOSITORY / "scripts/graphctl.py"),
+                "effectiveness",
+            ],
+            cwd=self.workspace,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env={**os.environ, "GRAPH_HARNESS_HOME": str(self.home)},
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        found = json.loads(result.stdout)
+        self.assertEqual(1, found["graphs_read"])
+        self.assertEqual(
+            [{"path": str(fifo), "reason": "not_a_regular_file"}],
+            found["unreadable"],
+        )
+
+    def test_a_graph_of_undecodable_bytes_is_refused_not_raised(self) -> None:
+        # A UnicodeDecodeError is a ValueError, not an OSError. Naming the
+        # refusals split one `except (OSError, ValueError)` into a read step
+        # and a parse step, and this case fell through the gap: a binary file
+        # named like a graph raised out of the report, which is the one thing
+        # this loader exists to prevent.
+        binary = self.workspace / "task-graph.bin.json"
+        binary.write_bytes(bytes([0xFF, 0xFE, 0x00, 0x80]) * 50)
+        good = self._graph("task-graph.json", graph(node("a")))
+
+        found = effectiveness.report([binary, good], home=self.home)
+
+        self.assertEqual(1, found["graphs_read"])
+        self.assertEqual(
+            [{"path": str(binary), "reason": "malformed"}], found["unreadable"]
+        )
+
+    def test_a_name_too_long_for_the_filesystem_is_refused_not_raised(self) -> None:
+        # Confining a path resolves it, and resolving can fail on the path
+        # itself: ENAMETOOLONG is an OSError, not the HarnessError the
+        # confinement raises, so it escaped the report and this command
+        # raised instead of naming the file.
+        too_long = self.workspace / ("task-graph." + "x" * 300 + ".json")
+        good = self._graph("task-graph.json", graph(node("a")))
+
+        found = effectiveness.report([too_long, good], home=self.home)
+
+        self.assertEqual(1, found["graphs_read"])
+        self.assertEqual(
+            [{"path": str(too_long), "reason": "unreadable"}], found["unreadable"]
+        )
+
+    def test_a_symlinked_graph_says_symlink_rather_than_outside(self) -> None:
+        # Confinement refuses a link-like path whatever it points at, so a
+        # symlink whose target sits inside the workspace came back as
+        # `outside_workspace` — telling the reader to point somewhere else
+        # when the fix is to replace the link. A reason that misdirects is
+        # worse than the bare path it replaced.
+        target = self.workspace / "real.json"
+        target.write_text(json.dumps(graph(node("a"))), encoding="utf-8")
+        link = self.workspace / "task-graph.link.json"
+        try:
+            link.symlink_to(target)
+        except OSError as exc:  # pragma: no cover - platform dependent
+            self.skipTest(f"symlinks unavailable: {exc}")
+        good = self._graph("task-graph.json", graph(node("b")))
+
+        found = effectiveness.report([link, good], home=self.home)
+
+        self.assertEqual(1, found["graphs_read"])
+        self.assertEqual(
+            [{"path": str(link), "reason": "symlink"}], found["unreadable"]
+        )
+
+    def test_a_path_genuinely_outside_still_says_so(self) -> None:
+        # The new reason must not swallow the old one.
+        outside = self.home / "elsewhere.json"
+        outside.write_text(json.dumps(graph(node("a"))), encoding="utf-8")
+
+        found = effectiveness.report([outside], home=self.home)
+
+        self.assertEqual(
+            [{"path": str(outside), "reason": "outside_workspace"}],
+            found["unreadable"],
+        )
+
+    def test_a_path_with_an_embedded_nul_is_refused_not_raised(self) -> None:
+        # A NUL in a path raises ValueError out of `lstat`, not OSError, so
+        # the guard that catches it is a `ValueError` arm. A mutation audit
+        # found the arm unpinned: removing it left the whole suite green,
+        # and the fix could have been reverted without anything noticing.
+        # Unreachable through argv, which cannot carry a NUL, but this
+        # function is callable directly and its contract is never to raise.
+        found = effectiveness.report(["task-graph.\x00.json"], home=self.home)
+
+        self.assertEqual(0, found["graphs_read"])
+        self.assertEqual(
+            [{"path": "task-graph.\x00.json", "reason": "unreadable"}],
+            found["unreadable"],
+        )
+
+    def test_a_graph_that_is_valid_json_but_not_an_object_is_refused(self) -> None:
+        # A top-level array parses cleanly, so it passes every guard above
+        # and is caught only by the type check. The same audit found that
+        # check unpinned: the malformed-JSON tests all use text that fails
+        # to parse, which exercises a different arm entirely.
+        listed = self.workspace / "task-graph.list.json"
+        listed.write_text("[1, 2, 3]", encoding="utf-8")
+        scalar = self.workspace / "task-graph.scalar.json"
+        scalar.write_text("42", encoding="utf-8")
+        good = self._graph("task-graph.json", graph(node("a")))
+
+        found = effectiveness.report([listed, scalar, good], home=self.home)
+
+        self.assertEqual(1, found["graphs_read"])
+        self.assertEqual(
+            [
+                {"path": str(listed), "reason": "malformed"},
+                {"path": str(scalar), "reason": "malformed"},
+            ],
+            found["unreadable"],
+        )
+
+    # Windows locks a process's working directory, so `os.rmdir` on it
+    # raises and the child would exit non-zero — the test would fail on
+    # the CI matrix's windows legs unconditionally, not only under
+    # mutation. The guard is unreachable there for the same reason: the
+    # operating system forbids the precondition.
+    @unittest.skipIf(os.name == "nt", "POSIX: the working directory can be removed")
+    def test_a_deleted_working_directory_is_refused_not_raised(self) -> None:
+        # The last unpinned guard, and the one I wrongly called unreachable.
+        # Confinement resolves the working directory first, and `Path.cwd()`
+        # raises FileNotFoundError once that directory is gone; the symlink
+        # check does not take it first, because `is_link_like` answers False
+        # for a missing path rather than raising. Without the OSError arm
+        # around `workspace_path`, `_load` raises instead of refusing.
+        #
+        # Driven in a subprocess: a process whose working directory has been
+        # deleted is a hostile state to leave lying around for sibling tests.
+        program = (
+            "import os, sys, tempfile;"
+            f"sys.path.insert(0, {str(REPOSITORY)!r});"
+            "from agent_harness import effectiveness;"
+            "d = tempfile.mkdtemp();"
+            "os.chdir(d);"
+            "os.rmdir(d);"
+            "print(effectiveness._load('task-graph.json'))"
+        )
+
+        result = subprocess.run(
+            [sys.executable, "-c", program],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env={**os.environ, "GRAPH_HARNESS_HOME": str(self.home)},
+        )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("(None, 'unreadable')", result.stdout.strip())
+
+    def test_every_path_passed_is_accounted_for(self) -> None:
+        # graphs_read plus unreadable must equal what was handed in, so a
+        # thin report cannot be mistaken for a complete one.
+        good = self._graph("task-graph.json", graph(node("a")))
+        broken = self.workspace / "broken.json"
+        broken.write_text("{not json", encoding="utf-8")
+        missing = self.workspace / "absent.json"
+
+        found = effectiveness.report([good, broken, missing], home=self.home)
+
+        self.assertEqual(3, found["graphs_read"] + len(found["unreadable"]))
+        self.assertEqual(1, found["graphs_read"])
+
+    def test_each_report_names_the_version_of_itself(self) -> None:
+        from agent_harness import conformance
+
+        found = effectiveness.report(
+            [self._graph("task-graph.json", graph())], home=self.home
+        )
+
+        self.assertEqual(effectiveness.SCHEMA_VERSION, found["schema_version"])
+        self.assertEqual(
+            conformance.SCHEMA_VERSION, conformance.report(self.home)["schema_version"]
+        )
+        # Both numbers moved because both shapes moved. Conformance:
+        # read_only became unattributed, edits replaced changed_lines, and
+        # outside_edits and the tree context were added after its version 1
+        # was committed. Effectiveness: unreadable was a list of path strings
+        # and is now a list of {path, reason} objects, which a reader cannot
+        # parse without knowing which one they hold. An earlier attempt
+        # raised this number with no shape change behind it and was failed
+        # for it, so the pairing below is the thing under test, not the
+        # numbers: each version must be at least 2, and unreadable must
+        # actually carry the newer shape.
+        self.assertGreaterEqual(conformance.SCHEMA_VERSION, 2)
+        self.assertGreaterEqual(effectiveness.SCHEMA_VERSION, 2)
+        self.assertEqual([], found["unreadable"])
+        refused = effectiveness.report([self.workspace / "gone.json"], home=self.home)
+        self.assertEqual(
+            [{"path": str(self.workspace / "gone.json"), "reason": "unreadable"}],
+            refused["unreadable"],
+        )

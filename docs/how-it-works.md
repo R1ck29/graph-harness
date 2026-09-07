@@ -107,8 +107,8 @@ This prints one line of judgement per session:
 | `bypass` | The session changed code and did not use the process. |
 | `unattributed` | Nothing recorded says who changed what. A question, or shell-only work. |
 | `incomplete` | The session was interrupted before it finished. |
-| `unobserved` | Something prevented a reliable observation. |
-| `bypass_suspected` | The session ran, but its work could not be observed. |
+| `unobserved` | No opening record was ever written, so there is no baseline. |
+| `bypass_suspected` | A Codex session, whose hooks do not run on the measured clients. |
 
 Plus a rate: of the sessions that changed something and could be judged, what
 fraction used the process.
@@ -171,10 +171,18 @@ two files and forty lines. It cannot say whether that was a typo fix or a
 redesign. So it reports the size and leaves the judgement to you, and it stays
 quiet about small changes rather than complaining about every one.
 
-**It says nothing when it is not sure.** If the observation failed — the
-project was not under version control, or the check ran out of time — the
-session is reported as unobserved rather than guessed at. An accusation based
-on a failed measurement is worse than silence.
+**Nothing is concluded from the fingerprint.** It is context for you to read,
+never evidence. The judgement rests only on the record of the assistant
+actually writing a file, so a session with no such record is `unattributed` —
+"nobody can say" — however much the project changed while it ran. That is the
+honest answer when a colleague edited in another terminal, and it is also the
+honest answer when the assistant edited through the shell.
+
+What this does *not* mean: a failed fingerprint is not a reason for silence. A
+project that is not under version control, or a check that ran out of time,
+still gets judged on its edit records — so a session that edited and skipped
+the graph is reported as a bypass there too. `unobserved` means one specific
+thing only: no opening record was ever written.
 
 **It never blocks you.** The strongest thing it does is print one line the next
 time you open a session. Work is never refused.
@@ -193,8 +201,10 @@ time you open a session. Work is never refused.
 
 ## Two assistants, one difference worth knowing
 
-The harness supports Claude Code and Codex. It installs the same three watchers
-into both, because both document the same way of accepting them.
+The harness supports Claude Code and Codex. It installs the same four watchers
+into both — one at session start, one at the end of each turn, one at session
+end, and one after an editing tool call — because both document the same way of
+accepting them.
 
 On the machines this was tested on, **Codex accepts the configuration and then
 never runs it.** Four separate attempts across two versions confirmed it. So

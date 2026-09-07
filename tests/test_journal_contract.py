@@ -482,6 +482,10 @@ class JournalReadGuardTests(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         return cast("list[dict[str, object]]", json.loads(result.stdout))
 
+    # os.mkfifo does not exist on Windows, and the CI matrix runs there.
+    # The guard the test drives is the same on both, but only POSIX can build
+    # the file that proves it.
+    @unittest.skipIf(os.name == "nt", "POSIX named pipe")
     def test_a_fifo_month_file_is_skipped_rather_than_read(self) -> None:
         self._real_month()
         os.mkfifo(self.journal / "2026-09.jsonl")
@@ -517,6 +521,24 @@ class JournalReadGuardTests(unittest.TestCase):
 
         self.assertEqual(1, len(self._read_within()))
 
+    @unittest.skipIf(os.name == "nt", "POSIX symlink")
+    def test_open_month_refuses_a_symlink_even_when_it_is_reached_directly(
+        self,
+    ) -> None:
+        # `is_named_month` already refuses a symlink by lstat, so nothing
+        # reaches `open_month` with one by the ordinary route, and every
+        # test above it therefore passes whether or not O_NOFOLLOW is set.
+        # That is the whole point of the flag: it closes the window between
+        # the enumeration's lstat and this open, which a swap can exploit.
+        # Reaching the opener directly is the only way to hold that window
+        # open on purpose, and without it this assertion fails.
+        elsewhere = self.home / "elsewhere.jsonl"
+        elsewhere.write_text("{}\n", encoding="utf-8")
+        link = self.journal / "2026-09.jsonl"
+        link.symlink_to(elsewhere)
+
+        self.assertIsNone(journal.open_month(link))
+
     def test_an_unreadable_month_does_not_blind_the_rest(self) -> None:
         self._real_month()
         blocked = self.journal / "2026-09.jsonl"
@@ -535,20 +557,34 @@ class JournalReadGuardTests(unittest.TestCase):
         # version built it from the raw temporary directory while the code
         # resolves /var to /private/var, so the mock never fired once and the
         # test passed against the very defect it was written for.
+        #
+        # `Path.lstat`, not `os.stat`. Patching `os.stat` worked here on 3.12
+        # and silently did nothing on 3.10, where `pathlib` binds the os
+        # functions into an accessor at import time: measured, a patched
+        # `os.stat` is reached by `Path.stat()` on 3.13 and is not on 3.10.
+        # The suite was therefore red on three of the six CI legs, and only
+        # this test's own liveness guard said so. `Path.lstat` is the call
+        # the code actually makes, so it is the same seam on every version.
+        #
+        # Not replaced by a real permission error, which was the obvious
+        # suggestion: `lstat` needs search permission on the parent, not read
+        # permission on the file, so `chmod 0o000` on one month leaves
+        # `lstat` succeeding — verified — and there is no way to fail it for
+        # one entry of a flat directory without failing it for all of them.
         for name in ("2026-07.jsonl", "2026-08.jsonl", "2026-09.jsonl"):
             self._real_month(name)
         resolved = journal.journal_directory(self.home)
         blocked = str(resolved / "2026-08.jsonl")
-        real_stat = os.stat
+        real_lstat = Path.lstat
         seen: list[str] = []
 
-        def refusing(path, *args, **kwargs):  # type: ignore[no-untyped-def]
-            seen.append(str(path))
-            if str(path) == blocked:
+        def refusing(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            seen.append(str(self))
+            if str(self) == blocked:
                 raise PermissionError(13, "Permission denied", blocked)
-            return real_stat(path, *args, **kwargs)
+            return real_lstat(self, *args, **kwargs)
 
-        with mock.patch("os.stat", refusing):
+        with mock.patch.object(Path, "lstat", refusing):
             months = [path.name for path in journal.month_files(self.home)]
             records = list(journal.read(self.home))
 
@@ -576,6 +612,10 @@ class JournalReadGuardTests(unittest.TestCase):
                 )
                 self.assertEqual(0, result.returncode, result.stderr)
 
+    # os.mkfifo does not exist on Windows, and the CI matrix runs there.
+    # The guard the test drives is the same on both, but only POSIX can build
+    # the file that proves it.
+    @unittest.skipIf(os.name == "nt", "POSIX named pipe")
     def test_a_month_swapped_for_a_fifo_after_it_is_named_cannot_hang(self) -> None:
         # A check followed by an open is two syscalls with a window between
         # them, and a writer racing that window hung three reads in forty.
@@ -617,6 +657,10 @@ class JournalReadGuardTests(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("True", result.stdout.strip())
 
+    # os.mkfifo does not exist on Windows, and the CI matrix runs there.
+    # The guard the test drives is the same on both, but only POSIX can build
+    # the file that proves it.
+    @unittest.skipIf(os.name == "nt", "POSIX named pipe")
     def test_every_reporting_command_finishes_with_a_fifo_present(self) -> None:
         self._real_month()
         os.mkfifo(self.journal / "2026-09.jsonl")

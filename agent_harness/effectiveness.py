@@ -18,12 +18,67 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from pathlib import Path
 from typing import Any, Iterable
 
 from . import conformance
+from .errors import HarnessError
+from .paths import is_link_like, workspace_path
+from .storage import MAX_GRAPH_BYTES
 
-SCHEMA_VERSION = 1
+# 2 because `unreadable` changed shape: it was a list of path strings and is
+# now a list of {path, reason} objects, so a reader holding both documents
+# needs to branch on this number to parse that field at all. An earlier
+# attempt raised it to 2 with three reasons that were all false — a renamed
+# key and two added ones, none of which had ever reached a commit — and it was
+# reverted to 1 for that. This bump is the opposite case: the shape moved
+# first and the number follows it. A version that moves without the shape
+# moving invites a compatibility shim whose every branch is dead; a shape that
+# moves without the version moving hands the reader no way to tell which
+# parser to use.
+SCHEMA_VERSION = 2
+
+# Why one path was not read. A bare path told a reader that something was
+# wrong and nothing about what to do: an archive over the size bound, one
+# reached through a symlink, a FIFO and a file with a stray comma all looked
+# alike, and each needs a different fix. Each name below is one refusal
+# `_load` can make, so the report says which one happened.
+#
+# No count is written here on purpose. It has been wrong three times: the
+# comment said four above five constants, the correction added a constant and
+# said five above six, and each time the number was the part that drifted
+# while the list stayed right. A reader can count the lines; a stale number
+# only misleads. `REFUSALS` below is the same list as a value, so a test can
+# hold the documentation to it instead of a person re-counting.
+#
+# `symlink` is separate from `outside_workspace` on purpose. Confinement
+# refuses a link-like path whatever it points at, so a symlink whose target
+# sits *inside* the workspace was reported as outside it — telling the reader
+# to point somewhere else when the fix is to replace the link. A reason that
+# misdirects is worse than the bare path it replaced.
+REFUSAL_OUTSIDE_WORKSPACE = "outside_workspace"
+REFUSAL_SYMLINK = "symlink"
+REFUSAL_NOT_A_REGULAR_FILE = "not_a_regular_file"
+REFUSAL_TOO_LARGE = "too_large"
+REFUSAL_UNREADABLE = "unreadable"
+REFUSAL_MALFORMED = "malformed"
+
+# Every reason `_load` can return, for anything that needs the whole set:
+# the reference documents are checked against this, not against a copy.
+REFUSALS = (
+    REFUSAL_OUTSIDE_WORKSPACE,
+    REFUSAL_SYMLINK,
+    REFUSAL_NOT_A_REGULAR_FILE,
+    REFUSAL_TOO_LARGE,
+    REFUSAL_UNREADABLE,
+    REFUSAL_MALFORMED,
+)
+
+# The same bound the graph store enforces. A report that read a file the store
+# would refuse would be the one place the limit does not hold, and this one
+# reads several files at once.
+MAX_REPORT_GRAPH_BYTES = MAX_GRAPH_BYTES
 
 # Which count each rate is a fraction of, so no rate is ever shown without the
 # base it was taken over. With three objectives on record these are anecdotes,
@@ -180,17 +235,13 @@ def report(
     """Read each graph file, fold it, and attach the conformance counts."""
 
     documents: list[dict[str, Any]] = []
-    unreadable: list[str] = []
+    unreadable: list[dict[str, str]] = []
     for path in graphs:
-        try:
-            loaded = json.loads(Path(path).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            unreadable.append(str(path))
+        loaded, refusal = _load(path)
+        if loaded is None:
+            unreadable.append({"path": str(path), "reason": refusal})
             continue
-        if isinstance(loaded, dict):
-            documents.append(loaded)
-        else:
-            unreadable.append(str(path))
+        documents.append(loaded)
     folded = report_from_documents(documents)
     folded["graphs_read"] = len(documents)
     folded["unreadable"] = unreadable
@@ -236,6 +287,81 @@ def _prefer(candidate: dict[str, Any], existing: dict[str, Any]) -> bool:
     if candidate_done != existing_done:
         return candidate_done
     return _count(candidate) > _count(existing)
+
+
+def _load(path: str | os.PathLike[str]) -> tuple[dict[str, Any] | None, str]:
+    """Read one graph document, or return the reason it was refused.
+
+    Each refusal matches a rule the rest of the harness already keeps, and
+    `REFUSALS` names them all. The path must not be a symlink, which
+    confinement refuses whatever it points at. It must lie inside the
+    workspace, because every other subcommand confines its paths and a report
+    that read anywhere on disk would be the exception. The file must be a
+    regular file. It must be no larger than the graph store allows, because
+    this reads several at once and the store's own limit would otherwise not
+    hold here. And it must parse to an object. The reason travels back with
+    the result, because the caller cannot recover it and a report that only
+    says "not read" leaves the user with nothing to act on.
+    """
+
+    try:
+        if is_link_like(Path(path)):
+            return None, REFUSAL_SYMLINK
+    except (OSError, ValueError):
+        # ValueError, not only OSError: a path carrying an embedded NUL
+        # raises `embedded null character in path` out of `lstat`, which
+        # `is_link_like` does not answer. Unreachable through argv, which
+        # cannot carry one, but this function is callable directly and its
+        # contract is that it never raises.
+        return None, REFUSAL_UNREADABLE
+    try:
+        confined = workspace_path(str(path))
+    except HarnessError:
+        return None, REFUSAL_OUTSIDE_WORKSPACE
+    except OSError:
+        # Reached when the failure is in resolving, not in the path given.
+        # `workspace_path` starts by resolving the working directory, and
+        # `Path.cwd()` raises FileNotFoundError — an OSError — once that
+        # directory has been removed out from under the process. The
+        # symlink check above does not catch it first, because
+        # `is_link_like` answers False for a missing path rather than
+        # raising.
+        #
+        # I previously called this arm unreachable, on the grounds that the
+        # symlink check now takes ENAMETOOLONG first. That much is true and
+        # it is why the long-name probe pins the earlier arm, but it is not
+        # the only way in, and a reviewer falsified the claim by deleting
+        # the working directory. Without this arm `_load` raises instead of
+        # refusing, which breaks the one contract it has.
+        return None, REFUSAL_UNREADABLE
+    try:
+        stats = confined.lstat()
+        # A size bound is not a time bound. A FIFO named like a graph has a
+        # size of zero, passes any byte limit, and then blocks the read for
+        # ever. This is the defect the journal reader closed one file over,
+        # and the same answer applies: judge the type, not just the size.
+        if not stat.S_ISREG(stats.st_mode):
+            return None, REFUSAL_NOT_A_REGULAR_FILE
+        if stats.st_size > MAX_REPORT_GRAPH_BYTES:
+            return None, REFUSAL_TOO_LARGE
+        text = confined.read_text(encoding="utf-8")
+    except OSError:
+        return None, REFUSAL_UNREADABLE
+    except UnicodeDecodeError:
+        # A UnicodeDecodeError is a ValueError, not an OSError. Splitting the
+        # single `except (OSError, ValueError)` this function used to have
+        # into a read step and a parse step dropped it on the floor, and a
+        # binary file named like a graph then raised out of the report — the
+        # one thing this loader exists to prevent. The file is present and
+        # readable; its bytes are wrong, so it is malformed.
+        return None, REFUSAL_MALFORMED
+    try:
+        loaded = json.loads(text)
+    except ValueError:
+        return None, REFUSAL_MALFORMED
+    if not isinstance(loaded, dict):
+        return None, REFUSAL_MALFORMED
+    return loaded, ""
 
 
 def _count(node: dict[str, Any]) -> int:

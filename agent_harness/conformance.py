@@ -19,7 +19,11 @@ from typing import Any, Iterable
 
 from . import codex_sessions, journal, session_hooks, worktree
 
-SCHEMA_VERSION = 1
+# Version 2 is the shape this reports now: `read_only` became `unattributed`,
+# `changed_lines` became `edits`, and `outside_edits` and the tree context
+# fields were added. A reader handed a report needs to know which shape it
+# holds, and the number is the only thing that says so.
+SCHEMA_VERSION = 2
 
 # What a verdict is worth. A session the client recorded closing was observed
 # to its end; one that only opened may still have been running when the record
