@@ -284,6 +284,120 @@ class PcInstallContractTests(unittest.TestCase):
             for event, commands in self._managed_events(document).items():
                 self.assertEqual(1, len(commands), f"{event}: {commands}")
 
+    def test_an_install_says_which_edited_entry_it_replaced(self) -> None:
+        # A repeated install replaces our entries rather than appending, so a
+        # raised timeout is reverted. That is correct — two entries would run
+        # the hook twice per edit — but reverting it silently leaves the
+        # person who made the edit with no way to learn why it stopped
+        # taking effect.
+        self._install()
+        self._edit_managed_entry(timeout=30)
+
+        result = self._install()
+
+        self.assertIn("replacing edited harness hook", result.stdout)
+        self.assertIn("PostToolUse", result.stdout)
+        self.assertIn("settings.json", result.stdout)
+        self.assertEqual(1, len(self._managed_edit_entries()))
+        self.assertEqual(10, self._managed_edit_entries()[0]["timeout"])
+
+    def test_an_untouched_reinstall_says_nothing_about_replacing(self) -> None:
+        # The notice must mean something. Printing it on every install would
+        # train the reader to ignore it.
+        self._install()
+
+        result = self._install()
+
+        self.assertNotIn("replacing edited harness hook", result.stdout)
+
+    def test_check_ignores_a_reformatted_settings_file(self) -> None:
+        # The clients own these files and rewrite them whenever a setting
+        # changes, in their own key order and indentation. Comparing the
+        # serialised bytes reported every such rewrite as hook drift on a
+        # machine where the hooks were untouched, and a check that is always
+        # red is a check nobody reads.
+        self._install()
+        path = self.claude / "settings.json"
+        document = json.loads(path.read_text(encoding="utf-8"))
+        reordered = dict(reversed(list(document.items())))
+        path.write_text(json.dumps(reordered, indent=4), encoding="utf-8")
+        self.assertNotEqual(
+            json.dumps(document, indent=2, sort_keys=True) + "\n",
+            path.read_text(encoding="utf-8"),
+        )
+
+        checked = self._run("--check")
+
+        self.assertEqual(0, checked.returncode, checked.stdout + checked.stderr)
+        self.assertIn("in sync", checked.stdout)
+
+    def test_check_still_reports_a_changed_managed_entry(self) -> None:
+        # The value comparison must not be a way of not looking. A hand
+        # edit to one of our own entries is a real difference and stays drift.
+        self._install()
+        self._edit_managed_entry(timeout=30)
+
+        drifted = self._run("--check")
+
+        self.assertEqual(2, drifted.returncode)
+        self.assertIn("hook drift", drifted.stderr)
+
+    def test_a_third_party_hook_is_never_drift_whichever_side_of_ours_it_sits(
+        self,
+    ) -> None:
+        # This test used to assert the opposite, on the stated grounds that
+        # "the installer writes the whole file, so a change it did not make
+        # is drift". That was false twice over. The installer does not own
+        # other people's entries — a whole verified node exists to make them
+        # survive a reinstall — and the old assertion passed only because of
+        # ordering: a rebuild appends ours last, so an unowned entry placed
+        # *after* ours shifted position and read as drift, while the
+        # identical entry placed *before* ours read as clean. Position is
+        # not a difference anyone made on purpose, and a check that goes
+        # permanently red when another tool appends a hook is a check
+        # nobody reads.
+        for position in ("before", "after"):
+            with self.subTest(position=position):
+                self._install()
+                path = self.claude / "settings.json"
+                document = json.loads(path.read_text(encoding="utf-8"))
+                entries = document["hooks"]["SessionStart"]
+                third = {"hooks": [{"type": "command", "command": "/somewhere/else"}]}
+                if position == "after":
+                    entries.append(third)
+                else:
+                    entries.insert(0, third)
+                path.write_text(json.dumps(document, indent=2), encoding="utf-8")
+
+                checked = self._run("--check")
+
+                self.assertEqual(0, checked.returncode, checked.stdout + checked.stderr)
+                self.assertIn("in sync", checked.stdout)
+                # And it is still there afterwards: --check changes nothing.
+                after = json.loads(path.read_text(encoding="utf-8"))
+                self.assertIn(third, after["hooks"]["SessionStart"])
+
+    def test_check_reports_drift_for_a_duplicated_managed_entry(self) -> None:
+        # Two of ours under one event would run the hook twice for every
+        # edit, which is what the whole managed-entry design exists to
+        # prevent, so a hand-duplicated entry has to be drift.
+        #
+        # Written because a mutation found it unpinned: collapsing the
+        # managed entries to one per command left the suite green while
+        # making this case invisible. The comment beside the code claimed
+        # the list form was load-bearing and nothing held it to that.
+        self._install()
+        path = self.claude / "settings.json"
+        document = json.loads(path.read_text(encoding="utf-8"))
+        entries = document["hooks"]["PostToolUse"]
+        entries.append(json.loads(json.dumps(entries[0])))
+        path.write_text(json.dumps(document, indent=2), encoding="utf-8")
+
+        drifted = self._run("--check")
+
+        self.assertEqual(2, drifted.returncode)
+        self.assertIn("hook drift", drifted.stderr)
+
     def test_check_reports_drift_for_a_removed_edit_hook(self) -> None:
         self._install()
         document = self._settings()

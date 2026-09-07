@@ -175,6 +175,106 @@ def _is_managed_hook(entry: Any, managed_commands: set[str]) -> bool:
     return entry.get("type") == "command" and entry.get("command") in managed_commands
 
 
+def _managed_entries(
+    settings: dict[str, Any], managed_commands: set[str]
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """Return the managed hook entries already in a settings document.
+
+    Keyed by event and command, so an entry can be compared against the one
+    about to replace it. Only entries this installer recognises as its own
+    are returned; everything else in the file is none of its business.
+    """
+
+    found: dict[tuple[str, str], dict[str, Any]] = {}
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return found
+    for event in MANAGED_HOOK_EVENTS:
+        configured = hooks.get(event)
+        if not isinstance(configured, list):
+            continue
+        for matcher in configured:
+            if not isinstance(matcher, dict):
+                continue
+            entries = matcher.get("hooks")
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not _is_managed_hook(entry, managed_commands):
+                    continue
+                command = entry.get("command")
+                if isinstance(command, str):
+                    carried = dict(entry)
+                    carried["matcher"] = matcher.get("matcher")
+                    found[(event, command)] = carried
+    return found
+
+
+def _managed_shape(
+    settings: dict[str, Any], managed_commands: set[str]
+) -> dict[str, list[dict[str, Any]]]:
+    """Return the managed entries per event, in order, and nothing else.
+
+    This is what the installer owns and therefore all it may call drift.
+    Comparing whole documents made an unowned entry's *position* decide the
+    answer: a third-party hook sitting after ours changed the rebuilt order,
+    because a rebuild always appends ours last, so it read as drift, while
+    the identical hook placed before ours read as clean. Position is not a
+    difference anyone made on purpose, and a check that goes permanently red
+    when another tool appends a hook is a check nobody reads — the same
+    failure as comparing serialised bytes, one layer in.
+
+    Entries are kept as a list rather than a set so a duplicated managed
+    entry still differs from a single one: two of ours would run the hook
+    twice per event, which is the thing the whole managed-entry design
+    exists to prevent.
+    """
+
+    shape: dict[str, list[dict[str, Any]]] = {}
+    hooks = settings.get("hooks")
+    for event in MANAGED_HOOK_EVENTS:
+        configured = hooks.get(event) if isinstance(hooks, dict) else None
+        ours: list[dict[str, Any]] = []
+        if isinstance(configured, list):
+            for matcher in configured:
+                if not isinstance(matcher, dict):
+                    continue
+                entries = matcher.get("hooks")
+                if not isinstance(entries, list):
+                    continue
+                for entry in entries:
+                    if _is_managed_hook(entry, managed_commands):
+                        carried = dict(entry)
+                        carried["matcher"] = matcher.get("matcher")
+                        ours.append(carried)
+        shape[event] = ours
+    return shape
+
+
+def _replacements(
+    existing: dict[str, Any], wanted: dict[str, Any], managed_commands: set[str]
+) -> list[str]:
+    """Name every managed entry that is about to be overwritten with different content.
+
+    A repeated install replaces our entries rather than appending to them,
+    which is what keeps the hook from running twice per edit. The cost is
+    that a person who raised a timeout or added an argument loses that edit
+    silently, and then cannot tell why their change stopped taking effect.
+    Saying so at install time is the whole remedy: the edit is still
+    reverted, but it is reverted out loud.
+    """
+
+    before = _managed_entries(existing, managed_commands)
+    after = _managed_entries(wanted, managed_commands)
+    changed: list[str] = []
+    for key, entry in sorted(before.items()):
+        replacement = after.get(key)
+        if replacement is not None and replacement != entry:
+            event, command = key
+            changed.append(f"{event} -> {command}")
+    return changed
+
+
 def _with_managed_hooks(
     settings: dict[str, Any],
     commands: dict[str, Path],
@@ -498,6 +598,15 @@ def install(home: Path, install_root: Path, runtime_bin: Path, dry_run: bool) ->
         updated = _managed_instructions(existing, block)
         if updated != existing:
             instruction_updates[path] = updated
+    managed_commands = {str(path) for path in _hook_commands(runtime_bin).values()}
+    for path, existing_document, wanted_document in (
+        (settings_path, _load_settings(settings_path), settings),
+        (codex_hooks_path, _load_settings(codex_hooks_path), codex_hooks),
+    ):
+        for replaced in _replacements(
+            existing_document, wanted_document, managed_commands
+        ):
+            print(f"replacing edited harness hook in {path}: {replaced}")
     rendered_settings = _json_bytes(settings)
     settings_changed = rendered_settings != (
         settings_path.read_bytes() if settings_path.exists() else b""
@@ -573,8 +682,19 @@ def check(home: Path, install_root: Path, runtime_bin: Path) -> None:
             or _managed_instructions(existing, block) != existing
         ):
             problems.append(f"instruction drift: {path}")
+    managed_commands = {str(path) for path in _hook_commands(runtime_bin).values()}
     for hook_path, document in _managed_hook_files(home, settings, codex_hooks):
-        if not hook_path.exists() or _json_bytes(document) != hook_path.read_bytes():
+        # Compared as the managed entries alone, not as whole documents and
+        # not as bytes. Each narrowing closed a false positive: bytes made a
+        # client's reformatting look like drift, and whole documents made an
+        # unowned hook's *position* look like drift. The installer owns one
+        # entry per managed event and nothing else in these files, so that
+        # is the only thing it is entitled to call drift.
+        if not hook_path.exists():
+            problems.append(f"hook drift: {hook_path}")
+            continue
+        on_disk = _managed_shape(_load_settings(hook_path), managed_commands)
+        if on_disk != _managed_shape(document, managed_commands):
             problems.append(f"hook drift: {hook_path}")
     if problems:
         raise InstallError("install drift detected:\n- " + "\n- ".join(problems))
