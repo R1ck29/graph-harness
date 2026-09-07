@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -358,6 +359,12 @@ class PcInstallContractTests(unittest.TestCase):
         # nobody reads.
         for position in ("before", "after"):
             with self.subTest(position=position):
+                # Reset between positions. `setUp` runs once per test method,
+                # not per subtest, so without this the second position ran
+                # over the entry the first had left and checked
+                # [third, ours, third] rather than the pair it names.
+                shutil.rmtree(self.claude, ignore_errors=True)
+                shutil.rmtree(self.codex, ignore_errors=True)
                 self._install()
                 path = self.claude / "settings.json"
                 document = json.loads(path.read_text(encoding="utf-8"))
@@ -376,6 +383,50 @@ class PcInstallContractTests(unittest.TestCase):
                 # And it is still there afterwards: --check changes nothing.
                 after = json.loads(path.read_text(encoding="utf-8"))
                 self.assertIn(third, after["hooks"]["SessionStart"])
+
+    def test_check_reports_drift_for_a_changed_managed_matcher(self) -> None:
+        # The matcher is not decoration: it is why the edit hook runs after
+        # editing tools and not after every read and search. Widening it to
+        # everything would pay the hook's cost on every tool call, so a
+        # hand-edited matcher has to be drift.
+        #
+        # Written because a mutation found it unpinned: making the
+        # comparison ignore the matcher field left the suite green while
+        # making both this case and a removed matcher invisible.
+        self._install()
+        path = self.claude / "settings.json"
+        document = json.loads(path.read_text(encoding="utf-8"))
+        for matcher in document["hooks"]["PostToolUse"]:
+            if any(
+                Path(str(h.get("command"))).stem == "graphctl-edit"
+                for h in matcher.get("hooks", [])
+            ):
+                matcher["matcher"] = ".*"
+        path.write_text(json.dumps(document, indent=2), encoding="utf-8")
+
+        drifted = self._run("--check")
+
+        self.assertEqual(2, drifted.returncode)
+        self.assertIn("hook drift", drifted.stderr)
+
+    def test_check_reports_drift_for_a_managed_entry_moved_to_another_event(
+        self,
+    ) -> None:
+        # An entry under the wrong event fires at the wrong moment, which is
+        # a different program. Comparing the managed entries per event is
+        # what catches it; flattening them across events does not, and that
+        # mutation left the suite green.
+        self._install()
+        path = self.claude / "settings.json"
+        document = json.loads(path.read_text(encoding="utf-8"))
+        moved = document["hooks"]["PostToolUse"].pop()
+        document["hooks"]["Stop"].append(moved)
+        path.write_text(json.dumps(document, indent=2), encoding="utf-8")
+
+        drifted = self._run("--check")
+
+        self.assertEqual(2, drifted.returncode)
+        self.assertIn("hook drift", drifted.stderr)
 
     def test_check_reports_drift_for_a_duplicated_managed_entry(self) -> None:
         # Two of ours under one event would run the hook twice for every
