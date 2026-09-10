@@ -355,6 +355,51 @@ class WorktreeSnapshotTests(unittest.TestCase):
 
         self.assertFalse(observed["git"])
 
+    def test_the_snapshot_is_the_same_whatever_the_locale_says(self) -> None:
+        # `_git` names its encoding instead of inheriting the locale's,
+        # because git emits paths as UTF-8 bytes on every platform and the
+        # Windows locale is not UTF-8. I declared this unreachable from a
+        # POSIX test on the grounds that a POSIX locale is already UTF-8 —
+        # true only of the default, and a test controls the environment of
+        # any subprocess it spawns.
+        #
+        # Driven through the real snapshot in two locales rather than by
+        # mocking the decode: the digest must not depend on which one.
+        # Without the named encoding the ISO-8859-1 run decodes the path as
+        # mojibake, so the untracked file is never found, its contents are
+        # never hashed, and the changed-line count collapses to zero.
+        (self.repo / "café.txt").write_text("one\n", encoding="utf-8")
+        program = (
+            "import json, sys;"
+            f"sys.path.insert(0, {str(REPOSITORY)!r});"
+            "from agent_harness import worktree;"
+            f"print(json.dumps(worktree.snapshot({str(self.repo)!r})))"
+        )
+
+        digests = {}
+        for label, locale_name in (
+            ("utf8", "en_US.UTF-8"),
+            ("latin1", "en_US.ISO8859-1"),
+        ):
+            done = subprocess.run(
+                [sys.executable, "-X", "utf8=0", "-c", program],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env={
+                    **os.environ,
+                    "LC_ALL": locale_name,
+                    "PYTHONUTF8": "0",
+                    "PYTHONCOERCECLOCALE": "0",
+                },
+            )
+            self.assertEqual(0, done.returncode, done.stderr)
+            digests[label] = json.loads(done.stdout)
+
+        self.assertEqual(digests["utf8"]["digest"], digests["latin1"]["digest"])
+        self.assertEqual(digests["utf8"]["lines"], digests["latin1"]["lines"])
+        self.assertGreater(digests["utf8"]["lines"], 0, "the file was not seen at all")
+
     def test_edit_to_an_untracked_file_with_a_quoted_name_is_visible(self) -> None:
         # Git C-quotes non-ASCII paths under its default core.quotepath, so a
         # newline-form parser resolves an escape string and misses the edit.
@@ -582,6 +627,36 @@ class JournalReadGuardTests(unittest.TestCase):
         if handle is not None:
             handle.close()
         self.assertEqual(1, len(self._read_within()))
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory permissions")
+    def test_an_unwritable_lock_directory_times_out_rather_than_raising_oserror(
+        self,
+    ) -> None:
+        # The lock retries on PermissionError as well as FileExistsError,
+        # because Windows raises access-denied when creating a lock its
+        # previous holder is unlinking. I declared this unreachable from a
+        # POSIX test on the grounds that POSIX raises FileExistsError; that
+        # was simply wrong. POSIX raises PermissionError from `open` with
+        # O_CREAT|O_EXCL whenever the *parent* is not writable, which any
+        # test can arrange with chmod. Measured: errno 13, and not an
+        # instance of FileExistsError.
+        #
+        # Without the PermissionError arm the error escapes as an OSError
+        # and `journal.append` drops the record. With it, the wait ends in
+        # the harness's own timeout, which is a refusal the caller can see.
+        from agent_harness.errors import HarnessError
+        from agent_harness.storage import FileLock
+
+        locked = self.home / "unwritable"
+        locked.mkdir()
+        locked.chmod(0o500)
+        self.addCleanup(locked.chmod, 0o700)
+
+        with self.assertRaises(HarnessError) as refused:
+            with FileLock(locked / "m.lock", timeout=0.2):
+                pass  # pragma: no cover - the lock never opens
+
+        self.assertIn("timed out waiting for lock", str(refused.exception))
 
     def test_an_unreadable_month_does_not_blind_the_rest(self) -> None:
         self._real_month()

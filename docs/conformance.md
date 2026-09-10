@@ -250,6 +250,53 @@ record that reached a finished status wins, because a round abandoned mid-flight
 leaves nodes frozen at `running` with a higher attempt count than the successor
 that verified them.
 
+## Checking which assertion is doing the work
+
+A green suite does not say which of its assertions is load-bearing. Three
+defects here were guards that looked load-bearing and were not: `O_NOFOLLOW`
+in the journal reader, the `ValueError` arm that answers an embedded NUL, and
+the type check that refuses a JSON array. Each could be deleted with every
+test still passing, so each could be reverted by accident and nothing would
+object.
+
+```
+python scripts/mutation_audit.py --fast
+```
+
+The audit copies the repository, disables one guard in the copy, runs the
+tests there, and subtracts a measured baseline so a pre-existing failure is
+never read as a mutation being caught. It reports which test objected, and
+names any guard that no longer has one. It refuses to run at all if its
+target resolves inside the working tree — an in-place version of it had a
+mutation captured by a filesystem snapshot and restored into the repository
+as though it were real source.
+
+It also refuses to run when a declared mutation no longer matches its source,
+rather than skipping that guard: a rename would otherwise turn a check into
+silence. A cheap version of the same check runs in the ordinary suite, so a
+rename is caught without waiting for the audit.
+
+Cost, measured on an eight-core laptop: `--fast` runs each guard against its
+own test module and takes about a minute for eighteen guards. Without
+`--fast` each guard runs the whole suite, which is roughly a minute per
+guard. `--only SUBSTRING` audits one guard, in a few seconds. It is a tool to
+reach for when changing a guard, not a gate on every push.
+
+Every guard it audits is pinned by a named test. Two were once declared
+unreachable from a POSIX test — the lock's Windows access-denied retry and
+the UTF-8 decoding of git output — and both claims were wrong. POSIX raises
+`PermissionError` from an exclusive create whenever the *parent* is not
+writable, which a test arranges with `chmod`; and a POSIX locale is only
+UTF-8 by default, while a test controls the environment of any subprocess it
+spawns. A reviewer wrote both tests to make the point.
+
+So a guard may still be declared uncovered, with its reason required on the
+same line, but the audit now treats such a declaration as a claim under test:
+if anything objects to the mutation, it says **declared uncovered, but
+something objected** and exits non-zero. Without that it could not falsify
+its own "unreachable" labels, which is exactly how the two false ones
+survived.
+
 ## Checking the mechanism itself
 
 `graphctl doctor` reports the journal's size and retained months, the last
