@@ -365,10 +365,22 @@ class WorktreeSnapshotTests(unittest.TestCase):
         #
         # Driven through the real snapshot in two locales rather than by
         # mocking the decode: the digest must not depend on which one.
-        # Without the named encoding the ISO-8859-1 run decodes the path as
+        # Without the named encoding, the non-UTF-8 run decodes the path as
         # mojibake, so the untracked file is never found, its contents are
         # never hashed, and the changed-line count collapses to zero.
-        (self.repo / "café.txt").write_text("one\n", encoding="utf-8")
+        #
+        # The second locale is chosen at run time rather than assumed. The
+        # first version of this test hard-coded `en_US.ISO8859-1`, which is
+        # not installed on the Linux CI runner: the child fell back to the
+        # POSIX locale, whose *filesystem* encoding is ASCII, and `stat` on
+        # the fixture's own name then raised UnicodeEncodeError before the
+        # product code was reached. macOS and Windows have fixed UTF-8 and
+        # UTF-16 filesystems and so never showed it. What this test needs is
+        # a locale whose text encoding is not UTF-8 while its filesystem
+        # encoding still carries the name; if the platform has none, there
+        # is nothing here to measure.
+        name = "café.txt"
+        (self.repo / name).write_text("one\n", encoding="utf-8")
         program = (
             "import json, sys;"
             f"sys.path.insert(0, {str(REPOSITORY)!r});"
@@ -376,12 +388,8 @@ class WorktreeSnapshotTests(unittest.TestCase):
             f"print(json.dumps(worktree.snapshot({str(self.repo)!r})))"
         )
 
-        digests = {}
-        for label, locale_name in (
-            ("utf8", "en_US.UTF-8"),
-            ("latin1", "en_US.ISO8859-1"),
-        ):
-            done = subprocess.run(
+        def child(locale_name: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
                 [sys.executable, "-X", "utf8=0", "-c", program],
                 capture_output=True,
                 text=True,
@@ -393,12 +401,55 @@ class WorktreeSnapshotTests(unittest.TestCase):
                     "PYTHONCOERCECLOCALE": "0",
                 },
             )
-            self.assertEqual(0, done.returncode, done.stderr)
-            digests[label] = json.loads(done.stdout)
 
-        self.assertEqual(digests["utf8"]["digest"], digests["latin1"]["digest"])
-        self.assertEqual(digests["utf8"]["lines"], digests["latin1"]["lines"])
-        self.assertGreater(digests["utf8"]["lines"], 0, "the file was not seen at all")
+        def encodings(locale_name: str) -> tuple[str, str]:
+            probe = subprocess.run(
+                [
+                    sys.executable,
+                    "-X",
+                    "utf8=0",
+                    "-c",
+                    "import locale, sys;"
+                    "print(locale.getpreferredencoding(False));"
+                    "print(sys.getfilesystemencoding())",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env={
+                    **os.environ,
+                    "LC_ALL": locale_name,
+                    "PYTHONUTF8": "0",
+                    "PYTHONCOERCECLOCALE": "0",
+                },
+            )
+            text, filesystem = probe.stdout.split()[:2]
+            return text, filesystem
+
+        candidates = ("en_US.ISO8859-1", "en_US.iso88591", "C", "POSIX")
+        chosen = None
+        for candidate in candidates:
+            text, filesystem = encodings(candidate)
+            if "utf" in text.lower().replace("-", ""):
+                continue  # the locale was ignored; nothing to measure
+            try:
+                name.encode(filesystem)
+            except (UnicodeEncodeError, LookupError):
+                continue  # the fixture's own name cannot survive the syscall
+            chosen = candidate
+            break
+        if chosen is None:
+            self.skipTest("no locale here is non-UTF-8 yet able to carry the name")
+
+        first = child("en_US.UTF-8")
+        second = child(chosen)
+
+        self.assertEqual(0, first.returncode, first.stderr)
+        self.assertEqual(0, second.returncode, second.stderr)
+        utf8, other = json.loads(first.stdout), json.loads(second.stdout)
+        self.assertEqual(utf8["digest"], other["digest"])
+        self.assertEqual(utf8["lines"], other["lines"])
+        self.assertGreater(utf8["lines"], 0, "the file was not seen at all")
 
     def test_edit_to_an_untracked_file_with_a_quoted_name_is_visible(self) -> None:
         # Git C-quotes non-ASCII paths under its default core.quotepath, so a
