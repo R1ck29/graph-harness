@@ -290,6 +290,27 @@ writable, which a test arranges with `chmod`; and a POSIX locale is only
 UTF-8 by default, while a test controls the environment of any subprocess it
 spawns. A reviewer wrote both tests to make the point.
 
+A guard is credited only when the objecting test carries its name **and**
+sits in the module the guard declared, and a guard that names a test must
+declare a module — a guard without one is refused rather than credited on the
+name alone. The method is read from the bare half of
+unittest's failure line and the module from the parenthesised id, because
+which half carries the method depends on the interpreter: before 3.11 the id
+is `tests.test_mod.Case`, after it `tests.test_mod.Case.test_x`. Taking the
+method off the end of the id therefore compared the *class* name on 3.10 —
+the project's own minimum — and no guard could match at all. Comparing the
+method name alone is comparing a bare name, and two modules may share one, so
+a guard could read as pinned while its author believed the other same-named
+test did the work. A reviewer built
+that collision twice — once with the name defined, once with it merely bound,
+so a source scan could not see it — and the audit credited it both times.
+
+The audit also refuses a declared name that does not resolve to exactly one
+test the loader collects: zero as well as many, since a stale name would
+otherwise read as a guard that lost its cover rather than as an entry to
+update. Names are counted from `unittest`'s own discovery rather than from
+`def` lines in the source, which is what missed the bound one.
+
 So a guard may still be declared uncovered, with its reason required on the
 same line, but the audit now treats such a declaration as a claim under test:
 if anything objects to the mutation, it says **declared uncovered, but

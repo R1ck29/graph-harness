@@ -41,6 +41,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unittest
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -261,7 +262,7 @@ def copy_repository() -> Path:
     return root
 
 
-def run_suite(root: Path, modules: tuple[str, ...]) -> set[str]:
+def run_suite(root: Path, modules: tuple[str, ...]) -> set[tuple[str, str]]:
     """Return the names of tests that failed or errored in *root*."""
 
     for cache in root.rglob("__pycache__"):
@@ -276,7 +277,133 @@ def run_suite(root: Path, modules: tuple[str, ...]) -> set[str]:
         timeout=900,
         env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
     )
-    return set(re.findall(r"^(?:FAIL|ERROR): (\w+)", done.stderr, re.MULTILINE))
+    return parse_failures(done.stderr)
+
+
+def parse_failures(stderr: str) -> set[tuple[str, str]]:
+    """Return (method, context) for each test unittest printed as failing.
+
+    Both halves of the line are kept, because neither is sufficient alone and
+    which one carries what depends on the interpreter:
+
+        3.10   FAIL: test_x (tests.test_mod.Case)
+        3.11+  FAIL: test_x (tests.test_mod.Case.test_x)
+
+    unittest only began appending the method to the parenthesised id in 3.11.
+    Reading the method from the *end* of that id therefore compared the class
+    name on 3.10, so no guard could ever match and the audit reported all
+    eighteen as caught by the wrong test — on the project's own minimum
+    interpreter, and on one of the two CI legs. The bare half before the
+    parenthesis is present on every version, so the method comes from there
+    and the module comes from the front of the id.
+    """
+
+    found: set[tuple[str, str]] = set()
+    for method, context in re.findall(
+        r"^(?:FAIL|ERROR): (\S+) \(([\w.]+)", stderr, re.MULTILINE
+    ):
+        found.add((method, context))
+    return found
+
+
+def render(caught: set[tuple[str, str]]) -> str:
+    """Show the failures as unittest would name them, for a reader."""
+
+    return ", ".join(sorted(f"{context}.{method}" for method, context in caught))
+
+
+def objected(caught: set[tuple[str, str]], guard: Guard) -> bool:
+    """Did *this guard's* named test object, in the module it was declared in?
+
+    Both halves are required, and the module half is why the qualified
+    identifier is captured at all. Comparing only the final component is
+    comparing the bare method name, which two modules may share: a guard
+    could then be credited to a test that never ran while its author
+    believed the other one pinned it. A reviewer demonstrated exactly that,
+    with a same-named no-op bound rather than defined so a source scan
+    could not see it, and the guard still read as pinned.
+    """
+
+    if not guard.focus:
+        # Refused rather than waved through. Falling back to the bare name
+        # here would re-open, for any guard authored without a focus, the
+        # exact hole the module requirement closes — a default that quietly
+        # disables a protection, which is a mistake this file has already
+        # made once elsewhere.
+        raise SystemExit(
+            f"{guard.name}: a guard with a named test must declare the module "
+            "it lives in, so the credit can be checked against it."
+        )
+    for method, context in caught:
+        if method != guard.pinned_by:
+            continue
+        # The module is the front of the parenthesised id on every version:
+        # `tests.test_mod.Case` and `tests.test_mod.Case.test_x` both begin
+        # with the module. Matched by prefix so a nested test package works.
+        if any(
+            context == module or context.startswith(f"{module}.")
+            for module in guard.focus
+        ):
+            return True
+    return False
+
+
+def collected_names(tests_dir: Path) -> dict[str, list[str]]:
+    """Map each test method name to the qualified ids unittest collects for it.
+
+    Asked of the loader rather than of the source text. Counting `def` lines
+    missed a test bound rather than defined — a reviewer used exactly that to
+    smuggle a same-named no-op past the check — and miscounted a name that
+    also appeared inside an indented docstring.
+    """
+
+    loader = unittest.defaultTestLoader
+    found: dict[str, list[str]] = {}
+
+    def walk(suite: object) -> None:
+        for item in suite:  # type: ignore[attr-defined]
+            if isinstance(item, unittest.TestCase):
+                identifier = item.id()
+                found.setdefault(identifier.split(".")[-1], []).append(identifier)
+            else:
+                walk(item)
+
+    # start at the package and name the top level explicitly: on 3.10
+    # `discover` refuses a start directory that is not importable, and a
+    # temporary fixture root never is.
+    walk(
+        loader.discover(
+            str(tests_dir),
+            pattern="test_*.py",
+            top_level_dir=str(tests_dir.parent),
+        )
+    )
+    return found
+
+
+def declared_once(guards: tuple[Guard, ...], tests_dir: Path | None = None) -> None:
+    """Refuse a declared name that does not resolve to exactly one test.
+
+    Checked before any mutation runs, so the audit refuses rather than
+    reporting a guard as pinned by whichever same-named test happened to
+    fail. Zero is refused as well as many: a stale name would otherwise read
+    as a guard that lost its cover rather than as an entry to update.
+    """
+
+    collected = collected_names(tests_dir if tests_dir is not None else LIVE / "tests")
+    for guard in guards:
+        if not guard.pinned_by:
+            continue
+        found = collected.get(guard.pinned_by, [])
+        if len(found) == 1:
+            continue
+        where = ", ".join(sorted(found)) or "nowhere"
+        raise SystemExit(
+            f"{guard.name}: its named test {guard.pinned_by} resolves to "
+            f"{len(found)} collected tests ({where}). A guard can only be "
+            "credited to one test; rename the duplicate, or point the guard "
+            "at the test you mean."
+        )
 
 
 def apply_mutation(root: Path, guard: Guard) -> None:
@@ -299,6 +426,7 @@ def apply_mutation(root: Path, guard: Guard) -> None:
 
 def audit(selected: tuple[Guard, ...], fast: bool) -> int:
     started = time.monotonic()
+    declared_once(selected)
     print(f"auditing {len(selected)} guards ({'focused' if fast else 'full suite'})")
     baseline_root = copy_repository()
     baseline_modules = _modules(selected, fast)
@@ -306,8 +434,8 @@ def audit(selected: tuple[Guard, ...], fast: bool) -> int:
     print(f"baseline failures: {sorted(baseline) or 'none'}\n")
 
     uncovered: list[Guard] = []
-    wrong_test: list[tuple[Guard, set[str]]] = []
-    contradicted: list[tuple[Guard, set[str]]] = []
+    wrong_test: list[tuple[Guard, set[tuple[str, str]]]] = []
+    contradicted: list[tuple[Guard, set[tuple[str, str]]]] = []
     for guard in selected:
         root = copy_repository()
         apply_mutation(root, guard)
@@ -326,14 +454,14 @@ def audit(selected: tuple[Guard, ...], fast: bool) -> int:
             # could not falsify its own uncovered claim.
             contradicted.append((guard, caught))
             print(f"  {guard.name:52} DECLARED UNCOVERED, BUT SOMETHING OBJECTED")
-            print(f"      caught: {', '.join(sorted(caught))}")
-        elif guard.pinned_by and guard.pinned_by not in caught:
+            print(f"      caught: {render(caught)}")
+        elif guard.pinned_by and not objected(caught, guard):
             wrong_test.append((guard, caught))
             print(f"  {guard.name:52} caught, but not by the named test")
             print(f"      named:  {guard.pinned_by}")
-            print(f"      caught: {', '.join(sorted(caught))}")
+            print(f"      caught: {render(caught)}")
         else:
-            named = guard.pinned_by if guard.pinned_by in caught else sorted(caught)[0]
+            named = guard.pinned_by if objected(caught, guard) else render(caught)
             print(f"  {guard.name:52} pinned by {named}")
         shutil.rmtree(root.parent, ignore_errors=True)
     shutil.rmtree(baseline_root.parent, ignore_errors=True)
