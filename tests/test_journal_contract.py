@@ -541,6 +541,89 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class JournalRepositoryReadTests(unittest.TestCase):
+    """Reading one repository's history must not parse every other one's.
+
+    A session start answers a question about one repository and used to parse
+    the whole retained journal to do it — 1.8 seconds over 453k records, past
+    the budget the hook is given and paid while holding the report lock.
+    """
+
+    def setUp(self) -> None:
+        self._directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._directory.cleanup)
+        self.home = Path(self._directory.name)
+
+    def _write(self, *records: dict[str, object]) -> None:
+        for record in records:
+            self.assertTrue(journal.append(dict(record), self.home))
+
+    def test_a_record_from_another_repository_is_never_parsed(self) -> None:
+        # The contract is about work not done, so it is asserted on the
+        # parser itself. Counting the records that come back would pass just
+        # as well with the old whole-journal read, which is what this
+        # replaces.
+        self._write(
+            journal.record("session_open", session_id="a1", repo="/repo/a"),
+            journal.record("session_open", session_id="b1", repo="/repo/b"),
+            journal.record("turn_end", session_id="a2", repo="/repo/a"),
+            journal.record("turn_end", session_id="b2", repo="/repo/b"),
+        )
+
+        with mock.patch(
+            "agent_harness.journal.json.loads", side_effect=json.loads
+        ) as loads:
+            found = list(journal.read_repo("/repo/a", self.home))
+
+        self.assertEqual(
+            ["a1", "a2"], [entry["session_id"] for entry in found], "wrong records"
+        )
+        self.assertEqual(2, loads.call_count, "a foreign record was parsed")
+
+    def test_a_repository_named_only_inside_another_field_is_not_returned(
+        self,
+    ) -> None:
+        # The substring is a prefilter and the parsed field is what decides.
+        # The marker has to reach the line unescaped for that to be tested at
+        # all: a string field carrying it renders with its quotes escaped and
+        # so never matches, which is how the first version of this test
+        # passed without the parsed check doing any work. A nested object
+        # renders its own keys unescaped, so this record matches the cheap
+        # test and must still be rejected on the field that counts. The
+        # journal is forgeable by anyone who can write the home directory,
+        # which the module docstring states, so a record shaped like this is
+        # not hypothetical.
+        self._write(
+            journal.record(
+                "session_open",
+                session_id="quoting",
+                repo="/repo/b",
+                snapshot={"repo": "/repo/a"},
+            ),
+            journal.record("session_open", session_id="genuine", repo="/repo/a"),
+        )
+
+        found = list(journal.read_repo("/repo/a", self.home))
+
+        self.assertEqual(["genuine"], [entry["session_id"] for entry in found])
+
+    def test_a_path_needing_json_escaping_still_matches_its_own_records(
+        self,
+    ) -> None:
+        # A Windows path renders with escaped separators, so the marker has
+        # to be built by the same encoder that wrote the line rather than by
+        # concatenating the raw string.
+        windows = "C:\\Users\\dev\\project"
+        self._write(
+            journal.record("session_open", session_id="win", repo=windows),
+            journal.record("session_open", session_id="other", repo="/repo/b"),
+        )
+
+        found = list(journal.read_repo(windows, self.home))
+
+        self.assertEqual(["win"], [entry["session_id"] for entry in found])
+
+
 class JournalReadGuardTests(unittest.TestCase):
     """Nothing a person can leave in the journal directory may hang a report.
 

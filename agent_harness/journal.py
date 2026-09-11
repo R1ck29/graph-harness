@@ -290,6 +290,50 @@ def read(home: str | os.PathLike[str] | None = None) -> Iterator[dict[str, Any]]
                     yield entry
 
 
+def read_repo(
+    repo: str, home: str | os.PathLike[str] | None = None
+) -> Iterator[dict[str, Any]]:
+    """Yield the records naming *repo*, in order, without parsing the others.
+
+    Every reader that answers a question about one repository parses the whole
+    retained history to do it. At one session start that was measured at 1.8
+    seconds over 453k records — past the budget a session-start hook is given,
+    and paid while holding the report lock — with the parse itself accounting
+    for 1.49s of it. A machine with fifty checkouts parses fifty times what it
+    reads.
+
+    The prefilter is a substring, and the parsed field is still what decides.
+    ``render`` is the only writer, it has emitted sorted keys with compact
+    separators since the journal existed, so the rendered form of this field
+    is exactly ``"repo":`` followed by the JSON string. A line missing that
+    cannot name this repository; a line containing it might only mention the
+    text inside some other field, so the record is checked again once parsed.
+    Order is preserved, and every record dropped here is one the callers
+    already skipped, so a caller that compares positions sees the same
+    sequence it saw before.
+    """
+
+    marker = '"repo":' + json.dumps(repo)
+    for month in month_files(home):
+        handle = open_month(month)
+        if handle is None:
+            continue
+        with handle:
+            for line in handle:
+                if marker not in line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if (
+                    isinstance(entry, dict)
+                    and isinstance(entry.get("event"), str)
+                    and entry.get("repo") == repo
+                ):
+                    yield entry
+
+
 def open_month(path: Path) -> "TextIO | None":
     """Open one month for reading, or return None when it must not be read.
 

@@ -317,17 +317,17 @@ def previous_bypass(
     transitions: list[int] = []
     attributed: dict[str, list[int]] = {}
     reported: set[str] = set()
-    history = list(journal.read())
-    # The whole journal is read, and one index space is used for everything in
-    # it. Reading part of it instead produced two defects in turn: a cut that
-    # dropped the tail hid a concurrent claim, so both sessions reported the
-    # same bypass; and reading claims whole while cutting transitions left a
-    # graphctl run recorded late outside every window, which accused the
-    # session that had used the graph.
+    # Every record this function consults names this repository — the filter
+    # below used to be the first line of the loop — so reading only those is
+    # the same history with the same relative order, and one index space is
+    # still used for everything in it. What must not be done is cutting the
+    # history by *time*: a cut that dropped the tail hid a concurrent claim
+    # and both sessions reported the same bypass, and reading claims whole
+    # while cutting transitions left a graphctl run recorded late outside
+    # every window, which accused the session that had used the graph.
+    history = list(journal.read_repo(repo))
     cut = _cut_position(history, since)
     for position, entry in enumerate(history):
-        if entry.get("repo") != repo:
-            continue
         event = entry.get("event")
         if event == "graph_transition":
             # A run that names its session is evidence for that session

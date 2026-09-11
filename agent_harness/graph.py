@@ -15,9 +15,9 @@ from .errors import HarnessError
 # The statuses that let dependent work proceed. A superseded dependency is
 # settled, not owed: its approach was abandoned rather than left undone, so a
 # node waiting on it would wait for ever. Named once because the same test is
-# made in five places and the sixth, in `_next_action`, still reads
-# `!= "verified"` and so tells a node to wait for a dependency nothing will
-# ever move.
+# made in six places, and the last of them to be written by hand — the list of
+# dependencies `_next_action` tells a blocked node to wait for — read
+# `!= "verified"` and so named one nothing would ever move.
 SETTLED = frozenset({"verified", "superseded"})
 
 STATUSES = {
@@ -1009,7 +1009,7 @@ class Graph:
             pending = [
                 dependency
                 for dependency in node["depends_on"]
-                if self.node(dependency)["status"] != "verified"
+                if self.node(dependency)["status"] not in SETTLED
             ]
             return f"wait for dependencies: {', '.join(pending)}"
         if status == "ready":

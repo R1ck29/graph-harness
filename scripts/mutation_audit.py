@@ -220,6 +220,49 @@ GUARDS: tuple[Guard, ...] = (
         focus=("tests.test_pc_install_contract",),
     ),
     Guard(
+        name="next action: a settled dependency is not pending",
+        relative="agent_harness/graph.py",
+        old='                if self.node(dependency)["status"] not in SETTLED',
+        new='                if self.node(dependency)["status"] != "verified"',
+        pinned_by="test_a_blocked_node_waits_only_for_dependencies_that_can_still_move",
+        focus=("tests.test_graph_contract",),
+    ),
+    Guard(
+        name="repo read: the prefilter is what avoids the parse",
+        relative="agent_harness/journal.py",
+        old="                if marker not in line:\n                    continue",
+        new="                if False:\n                    continue",
+        pinned_by="test_a_record_from_another_repository_is_never_parsed",
+        focus=("tests.test_journal_contract",),
+    ),
+    Guard(
+        # Reverting the call site drops the repository filter with it, which
+        # is a change in what is reported rather than in what it costs. The
+        # test that objects is the one that was already there.
+        name="repo read: the call site still filters by repository",
+        relative="agent_harness/session_hooks.py",
+        old="    history = list(journal.read_repo(repo))",
+        new="    history = list(journal.read())",
+        pinned_by="test_a_session_in_another_repository_is_not_reported",
+        focus=("tests.test_session_hook_contract",),
+    ),
+    Guard(
+        name="repo read: the parsed field decides, not the substring",
+        relative="agent_harness/journal.py",
+        old='                    and entry.get("repo") == repo\n                ):',
+        new="                ):",
+        pinned_by="test_a_repository_named_only_inside_another_field_is_not_returned",
+        focus=("tests.test_journal_contract",),
+    ),
+    Guard(
+        name="repo read: build the marker with the encoder that wrote the line",
+        relative="agent_harness/journal.py",
+        old="    marker = '\"repo\":' + json.dumps(repo)",
+        new="    marker = '\"repo\":\"' + repo + '\"'",
+        pinned_by="test_a_path_needing_json_escaping_still_matches_its_own_records",
+        focus=("tests.test_journal_contract",),
+    ),
+    Guard(
         name="lock: retry on Windows access-denied",
         relative="agent_harness/storage.py",
         old="            except (FileExistsError, PermissionError) as exc:",

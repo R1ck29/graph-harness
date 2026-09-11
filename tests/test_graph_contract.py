@@ -160,6 +160,29 @@ class GraphSchemaAndSchedulingTests(unittest.TestCase):
             "withdraw plan", task_graph.status_summary()["nodes"][0]["next_action"]
         )
 
+    def test_a_blocked_node_waits_only_for_dependencies_that_can_still_move(
+        self,
+    ) -> None:
+        # A superseded dependency is settled: its approach was abandoned, so
+        # nothing will ever move it, and naming it tells the reader to wait
+        # for something that cannot happen. Every other dependency check in
+        # this module reads both settled statuses; this one was the last
+        # place left reading `!= "verified"`.
+        task_graph = Graph.from_dict(
+            graph(
+                node("abandoned", status="superseded"),
+                node("pending", status="ready"),
+                node("later", depends_on=["abandoned", "pending"]),
+            )
+        )
+
+        actions = {
+            item["id"]: item["next_action"]
+            for item in task_graph.status_summary()["nodes"]
+        }
+
+        self.assertEqual("wait for dependencies: pending", actions["later"])
+
 
 class GraphVerificationTests(unittest.TestCase):
     def _submitted_graph(self) -> Graph:
