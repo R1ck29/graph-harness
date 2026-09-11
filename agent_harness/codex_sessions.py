@@ -167,7 +167,12 @@ def _timestamp(value: Any) -> str | None:
 
     try:
         number = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError as well as the other two: the column is REAL, and
+        # SQLite round-trips 9e999 to `inf`, which `int` refuses that way.
+        # Raising here escaped `sessions()` and was swallowed by the blanket
+        # handler in `conformance._codex_verdicts`, which drops *every* Codex
+        # session rather than the one with the bad column.
         return None
     # Codex carries both second and millisecond columns; a value far past the
     # plausible second range is a millisecond one.
@@ -176,6 +181,9 @@ def _timestamp(value: Any) -> str | None:
     try:
         return utc_from_epoch(number)
     except (OSError, OverflowError, ValueError):
+        # All three arms are reachable, which is why the tuple is not
+        # narrowed: after the millisecond division a column of 10**18 raises
+        # ValueError, 10**21 raises OSError, and 10**24 raises OverflowError.
         # An undocumented column can hold a number outside the range the
         # platform can render as a date. The session is still reported — that
         # it ran, and where, is the useful part — with no bounds, which is

@@ -294,12 +294,16 @@ GUARDS: tuple[Guard, ...] = (
         focus=("tests.test_conformance_contract",),
     ),
     Guard(
-        name="codex timestamps: an unrenderable column is refused, not raised",
+        name="codex timestamps: every arm of the converter's handler",
         relative="agent_harness/codex_sessions.py",
+        # Narrowed to one arm rather than emptied. Each arm is reached by a
+        # different magnitude after the millisecond division — 1e18 raises
+        # ValueError, 1e21 OSError, 1e24 OverflowError — so a test that only
+        # reached the first would pass while two thirds of the handler went
+        # unexercised. That was the state a reviewer found.
         old="    except (OSError, OverflowError, ValueError):",
-        new="    except _NeverRaised:",
-        pinned_by="test_an_unrenderable_timestamp_leaves_the_session_without_bounds",
-        needs_never=True,
+        new="    except ValueError:",
+        pinned_by="test_a_column_too_large_for_the_platform_is_refused_not_raised",
         focus=("tests.test_conformance_contract",),
     ),
     Guard(
@@ -341,6 +345,30 @@ GUARDS: tuple[Guard, ...] = (
         new='            descriptor = os.open(\n                self.path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)\n            )',
         pinned_by="test_a_graph_reached_through_a_symlink_is_refused",
         focus=("tests.test_storage_and_cli_contract",),
+    ),
+    Guard(
+        name="contested: only an observed window may contest",
+        relative="agent_harness/conformance.py",
+        old='        if verdict.get("bounds") == BOUNDS_OBSERVED:\n            by_repo.setdefault(verdict["repo"], []).append(verdict)',
+        new='        if True:\n            by_repo.setdefault(verdict["repo"], []).append(verdict)',
+        pinned_by="test_a_codex_row_lifetime_does_not_contest_an_observed_session",
+        focus=("tests.test_conformance_contract",),
+    ),
+    Guard(
+        name="contested: an observed window still contests another",
+        relative="agent_harness/conformance.py",
+        old='        if verdict.get("bounds") == BOUNDS_OBSERVED:',
+        new='        if verdict.get("bounds") == BOUNDS_THREAD_LIFETIME:',
+        pinned_by="test_two_observed_sessions_still_contest_each_other",
+        focus=("tests.test_conformance_contract",),
+    ),
+    Guard(
+        name="codex timestamps: an infinite column costs one session only",
+        relative="agent_harness/codex_sessions.py",
+        old="    except (TypeError, ValueError, OverflowError):",
+        new="    except (TypeError, ValueError):",
+        pinned_by="test_an_infinite_column_costs_one_session_and_not_every_session",
+        focus=("tests.test_conformance_contract",),
     ),
     Guard(
         name="lock: retry on Windows access-denied",

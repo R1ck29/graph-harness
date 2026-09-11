@@ -1,0 +1,5 @@
+{
+  "criterion": "The tests that pinned the epoch integer are updated to pin the new form deliberately, not deleted",
+  "kind": "independent_test",
+  "summary": "MET. Both original tests are present and stronger; the millisecond one now asserts the two column units render identically rather than matching one literal. Three guards, all pinned, output quoted verbatim. Suites 409 OK on 3.12.12 and 409 OK on 3.10.19. Two corrections to the executor's account: the unrenderable test reaches ValueError on both interpreters, never OSError, because 10**18 is divided by 1000 first - so the OSError arm is untested and a guard dropping only OSError would pass. And a pre-existing asymmetry the node walked past: _timestamp's first try catches (TypeError, ValueError) but not OverflowError, while the second try it added does; SQLite round-trips 9e999 to inf, _timestamp(inf) raises OverflowError, and _codex_verdicts' blanket except then drops every Codex session from the report. Conversion itself verified lossless for 0, -1, -10**9, floats, bools and strings, identically on both interpreters. Docs carry no statement of the old form."
+}

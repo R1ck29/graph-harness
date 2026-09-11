@@ -21,11 +21,19 @@ from typing import Any, Iterable
 
 from . import codex_sessions, journal, session_hooks, worktree
 
-# Version 2 is the shape this reports now: `read_only` became `unattributed`,
-# `changed_lines` became `edits`, and `outside_edits` and the tree context
-# fields were added. A reader handed a report needs to know which shape it
-# holds, and the number is the only thing that says so.
-SCHEMA_VERSION = 2
+# Version 3 adds `bounds`, which says what a verdict's two timestamps
+# describe. Version 2 was the shape before that: `read_only` became
+# `unattributed`, `changed_lines` became `edits`, and `outside_edits` and the
+# tree context fields were added. A reader handed a report needs to know which
+# shape it holds, and the number is the only thing that says so.
+SCHEMA_VERSION = 3
+
+# What a verdict's `started_at` and `ended_at` describe. A reader comparing
+# two sessions has to know this: one pair is when the session was observed to
+# open and close, the other is the lifetime of a row in another tool's store,
+# and only the first can support a claim that two sessions ran together.
+BOUNDS_OBSERVED = "observed"
+BOUNDS_THREAD_LIFETIME = "thread_lifetime"
 
 # What a verdict is worth. A session the client recorded closing was observed
 # to its end; one that only opened may still have been running when the record
@@ -136,6 +144,7 @@ def _judge(state: dict[str, Any]) -> dict[str, Any]:
         "edits": 0,
         "outside_edits": 0,
         "confidence": LOW,
+        "bounds": BOUNDS_OBSERVED,
     }
     if opened is None:
         # Something happened in this session, but its beginning was never
@@ -186,17 +195,30 @@ def _tree_context(before: Any, after: Any) -> tuple[int, int]:
 
 
 def _contested(verdicts: list[dict[str, Any]]) -> None:
-    """Flag sessions whose repository had another session running with them.
+    """Flag sessions whose repository had another *observed* session with them.
 
     Concurrent sessions share one working tree, so neither one's change can be
     attributed to it alone. Saying so is more useful than quietly reporting a
     number that may belong to the other.
+
+    Only sessions whose window was observed take part, which is what the
+    `bounds` field on each verdict says. A Codex verdict's window comes from
+    the store's `created_at` and `updated_at`, and `updated_at` is the thread
+    row's last-modified time rather than the moment the session ended: on a
+    real store of 137 threads the median span is six minutes but thirteen
+    span more than a day and the longest is twenty-four. Letting those
+    windows contest anything marked 118 of those 137 as contested by each
+    other, and marked a fully observed session — one with its own edit
+    records and a graph transition inside its window — as contested by a
+    Codex row whose lifetime merely spanned it. That session's changes are
+    attributable to it alone, so the flag was saying something false.
     """
 
     by_repo: dict[str, list[dict[str, Any]]] = {}
     for verdict in verdicts:
         verdict["contested"] = False
-        by_repo.setdefault(verdict["repo"], []).append(verdict)
+        if verdict.get("bounds") == BOUNDS_OBSERVED:
+            by_repo.setdefault(verdict["repo"], []).append(verdict)
     for group in by_repo.values():
         for first in group:
             for second in group:
@@ -210,16 +232,20 @@ def _contested(verdicts: list[dict[str, Any]]) -> None:
 def _overlaps(first: dict[str, Any], second: dict[str, Any]) -> bool:
     """Report whether two sessions were open at the same time.
 
-    Both ends of both sessions have to be recorded at all. A session whose
-    opening or closing was never observed cannot be placed against another
-    one, and guessing would invent an overlap rather than find one.
+    The check is on form *and* presence, and both halves are load-bearing.
+    Presence, because a session whose opening or closing was never recorded
+    cannot be placed against another one and guessing would invent an overlap
+    rather than find one. Form, because `journal.read` validates only the
+    `event` field: a forged or corrupt record carrying an integer `ts`
+    reaches this key through `_judge` unchanged, and comparing it against a
+    date raises. Replacing this with a presence-only check was tried and
+    `report` died with a TypeError on exactly that input.
 
-    The check is on presence, not on form. It used to be on form as well,
-    because the Codex store's whole seconds reached this key beside the
-    hooks' ISO timestamps and comparing the two would have compared a number
-    against a date; `codex_sessions` now renders its own into the same form,
-    so a Codex session that really did run alongside another is reported as
-    contested instead of being silently exempt.
+    What it is no longer for is telling two timestamp *sources* apart.
+    `codex_sessions` renders its own into the form the hooks record, so that
+    difference is gone — but a Codex window is a thread row's lifetime rather
+    than a run, so `_contested` excludes those before reaching here. See
+    there for why.
     """
 
     bounds = [
@@ -261,10 +287,16 @@ def _codex_verdicts(home: str | os.PathLike[str] | None = None) -> list[dict[str
             "outside_edits": 0,
             "confidence": LOW,
             "contested": False,
+            # Not `observed`: `updated_at` is when the thread row was last
+            # written, not when the session ended, so this window cannot
+            # support a claim about what ran alongside what.
+            "bounds": BOUNDS_THREAD_LIFETIME,
             "verdict": "bypass_suspected",
             "note": (
                 "Codex hooks do not run on the measured clients, so this "
-                "session's working tree was never observed."
+                "session's working tree was never observed, and the times "
+                "below are the lifetime of a row in Codex's store rather "
+                "than the start and end of a run."
             ),
         }
         for session in sessions

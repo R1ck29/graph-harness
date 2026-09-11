@@ -11,8 +11,9 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from agent_harness import cli, codex_sessions, journal
+from agent_harness import cli, codex_sessions, conformance, journal
 from agent_harness.errors import HarnessError
+from agent_harness.graph import utc_from_epoch
 from tests import workspace_root
 
 REPOSITORY = Path(__file__).resolve().parents[1]
@@ -543,23 +544,57 @@ class CodexSessionReaderTests(unittest.TestCase):
         self.assertGreater(recovered, "2026-01-01T00:00:00+00:00")
         self.assertLess(recovered, "2026-12-31T00:00:00+00:00")
 
-    def test_an_unrenderable_timestamp_leaves_the_session_without_bounds(
+    def test_an_infinite_column_costs_one_session_and_not_every_session(
         self,
     ) -> None:
-        # The store is undocumented, so a column can hold a number no
-        # platform can render as a date. That the session ran, and where, is
-        # still worth reporting.
+        # The column is REAL and SQLite round-trips 9e999 to `inf`, which
+        # `int` refuses with OverflowError. That escaped `sessions()` and was
+        # swallowed by the blanket handler in `_codex_verdicts`, which drops
+        # every Codex session rather than the one with the bad column.
         self._store(
             "state_5.sqlite",
-            "id TEXT, cwd TEXT, created_at INTEGER, updated_at INTEGER, source TEXT",
-            [("a", "/r", 10**18, 10**18 + 7, "exec")],
+            "id TEXT, cwd TEXT, created_at REAL, updated_at REAL, source TEXT",
+            [
+                ("bad", "/r", 9e999, 9e999, "exec"),
+                ("good", "/r", 1788088667, 1788088674, "exec"),
+            ],
         )
 
-        observed = codex_sessions.sessions(self.home)[0]
+        observed = {
+            item["session_id"]: item for item in codex_sessions.sessions(self.home)
+        }
 
-        self.assertIsNone(observed["started_at"])
-        self.assertIsNone(observed["ended_at"])
-        self.assertEqual("/r", observed["repo"])
+        self.assertEqual({"bad", "good"}, set(observed))
+        self.assertIsNone(observed["bad"]["started_at"])
+        self.assertEqual("2026-08-30T11:17:47+00:00", observed["good"]["started_at"])
+
+    def test_a_column_too_large_for_the_platform_is_refused_not_raised(self) -> None:
+        # Each arm of the converter's handler is reachable with a different
+        # magnitude, after the millisecond division: 1e18 becomes 1e15 and
+        # raises ValueError, 1e21 becomes 1e18 and raises OSError, and 1e24
+        # becomes 1e21 and raises OverflowError. Asserted together so
+        # narrowing the tuple to any one of them is caught.
+        #
+        # Stored in REAL columns, because SQLite's INTEGER is 64-bit and
+        # refuses anything above about 9.2e18 outright — so an integer column
+        # can only ever reach the ValueError arm, and a test written against
+        # one would have left the other two unexercised while looking
+        # thorough.
+        self._store(
+            "state_5.sqlite",
+            "id TEXT, cwd TEXT, created_at REAL, updated_at REAL, source TEXT",
+            [
+                ("value-error", "/r", 1e18, 1e18, "exec"),
+                ("os-error", "/r", 1e21, 1e21, "exec"),
+                ("overflow-error", "/r", 1e24, 1e24, "exec"),
+            ],
+        )
+
+        observed = codex_sessions.sessions(self.home)
+
+        self.assertEqual(3, len(observed))
+        self.assertEqual([None, None, None], [item["started_at"] for item in observed])
+        self.assertEqual(["/r", "/r", "/r"], [item["repo"] for item in observed])
 
     def test_a_store_missing_a_required_column_fails_by_name(self) -> None:
         self._store(
@@ -653,6 +688,139 @@ class CodexSessionReaderTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UnobservedWindowTests(unittest.TestCase):
+    """A window nobody observed must not decide that two sessions overlapped.
+
+    Rendering Codex's timestamps into the hooks' form made them comparable,
+    and that turned out to be the wrong thing to act on. `updated_at` is when
+    the thread row was last written, not when the session ended: a reviewer
+    measured a real store of 137 threads where the median span is six minutes
+    but thirteen span over a day and the longest is twenty-four. Acting on
+    those windows marked 118 of the 137 as contested by each other, and
+    marked a fully observed session as contested by a row that merely spanned
+    it.
+    """
+
+    def setUp(self) -> None:
+        self._directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._directory.cleanup)
+        self.home = Path(self._directory.name)
+
+    def _codex_store(self, rows: list[tuple[object, ...]]) -> None:
+        codex = self.home / ".codex"
+        codex.mkdir(exist_ok=True)
+        connection = sqlite3.connect(codex / "state_5.sqlite")
+        with connection:
+            connection.execute(
+                "CREATE TABLE threads (id TEXT, cwd TEXT, created_at INTEGER, "
+                "updated_at INTEGER, source TEXT)"
+            )
+            for row in rows:
+                connection.execute("INSERT INTO threads VALUES (?, ?, ?, ?, ?)", row)
+        connection.close()
+
+    def _observed_session(
+        self, session: str, repo: str, opened: int, closed: int
+    ) -> None:
+        for event, stamp in (("session_open", opened), ("session_close", closed)):
+            entry = journal.record(
+                event,
+                client="claude",
+                session_id=session,
+                repo=repo,
+                snapshot={
+                    "git": True,
+                    "head": "0" * 40,
+                    "digest": "a" * 64,
+                    "files": 1,
+                    "lines": 3,
+                    "degraded": False,
+                },
+            )
+            entry["ts"] = utc_from_epoch(stamp)
+            self.assertTrue(journal.append(entry, self.home))
+        edit = journal.record(
+            "edit",
+            client="claude",
+            session_id=session,
+            repo=repo,
+            tool="Edit",
+            path_id="abcdef123456",
+        )
+        edit["ts"] = utc_from_epoch(opened + 1)
+        self.assertTrue(journal.append(edit, self.home))
+        # A graphctl run inside the window, so the session is `conformant`
+        # rather than `bypass`. The sharpest form of the defect is a session
+        # that followed the protocol being told its work may belong to
+        # something else.
+        moved = journal.record(
+            "graph_transition",
+            client="claude",
+            session_id=session,
+            repo=repo,
+            command="submit",
+        )
+        moved["ts"] = utc_from_epoch(opened + 2)
+        self.assertTrue(journal.append(moved, self.home))
+
+    def test_a_codex_row_lifetime_does_not_contest_an_observed_session(self) -> None:
+        # The reviewer's counter-example, kept. The Codex window is 23.6 days
+        # wide, the observed session is 30 seconds inside it, and that
+        # session's one edit is attributable to it alone.
+        wide_start, wide_end = 1786000000, 1786000000 + 2_041_985
+        self._codex_store([("codex-wide", "/repo", wide_start, wide_end, "exec")])
+        self._observed_session("hook", "/repo", wide_start + 100, wide_start + 130)
+
+        report = conformance.report(self.home)
+        by_id = {item["session_id"]: item for item in report["sessions"]}
+
+        self.assertEqual("conformant", by_id["hook"]["verdict"])
+        self.assertFalse(
+            by_id["hook"]["contested"], "an unobserved window contested it"
+        )
+        self.assertFalse(by_id["codex-wide"]["contested"])
+
+    def test_two_codex_rows_do_not_contest_each_other(self) -> None:
+        self._codex_store(
+            [
+                ("a", "/repo", 1786000000, 1786000100, "exec"),
+                ("b", "/repo", 1786000050, 1786000150, "exec"),
+            ]
+        )
+
+        report = conformance.report(self.home)
+
+        self.assertEqual(
+            [False, False], [item["contested"] for item in report["sessions"]]
+        )
+
+    def test_two_observed_sessions_still_contest_each_other(self) -> None:
+        # The other half of the rule: excluding unobserved windows must not
+        # exclude the case the flag exists for.
+        self._observed_session("first", "/repo", 1786000000, 1786000100)
+        self._observed_session("second", "/repo", 1786000050, 1786000150)
+
+        report = conformance.report(self.home, include_codex=False)
+
+        self.assertEqual(
+            [True, True], [item["contested"] for item in report["sessions"]]
+        )
+
+    def test_every_verdict_says_what_its_timestamps_describe(self) -> None:
+        # A reader comparing two sessions has to be able to tell which pair
+        # was observed, so the distinction is in the report rather than only
+        # in this module.
+        self._codex_store([("codex", "/repo", 1786000000, 1786000100, "exec")])
+        self._observed_session("hook", "/other", 1786000000, 1786000100)
+
+        report = conformance.report(self.home)
+        bounds = {item["session_id"]: item["bounds"] for item in report["sessions"]}
+
+        self.assertEqual("thread_lifetime", bounds["codex"])
+        self.assertEqual("observed", bounds["hook"])
+        self.assertEqual(3, report["schema_version"])
 
 
 class EscapeHatchTransitionTests(unittest.TestCase):

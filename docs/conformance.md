@@ -136,12 +136,19 @@ one directory.
 | `unattributed` | no edit records, so nothing says who changed what; excluded from the rate |
 | `incomplete` | opened, never ended |
 | `unobserved` | no opening record |
-| `bypass_suspected` | a Codex session, which runs no hooks at all |
+| `bypass_suspected` | a Codex session, which runs no hooks at all, so its window is a row lifetime rather than a run |
 
-Each verdict carries `confidence`, `contested` when another session in the same
-repository overlapped it, `changed_files` and `edits`, and the tree context. The
-rate counts only `conformant` and `bypass`: a session nothing can attribute says
-nothing about whether the protocol was followed.
+Each verdict carries `confidence`, `changed_files` and `edits`, the tree
+context, and two fields about time. `bounds` says what the verdict's
+`started_at` and `ended_at` describe: `observed` when the hooks recorded the
+session opening and closing, `thread_lifetime` when they came from Codex's own
+store, where the second value is when the thread row was last written rather
+than when the session ended. `contested` is set when another session in the
+same repository overlapped it, and only `observed` windows take part — a
+Codex row's lifetime can run to weeks, and letting one contest anything told a
+session that had followed the protocol its work might belong to something
+else. The rate counts only `conformant` and `bypass`: a session nothing can
+attribute says nothing about whether the protocol was followed.
 
 `changed_files` is the number of distinct `path_id` values the session recorded
 inside the repository and `edits` is how many editing tool calls it made there;
