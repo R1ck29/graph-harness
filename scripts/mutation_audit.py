@@ -402,19 +402,22 @@ GUARDS: tuple[Guard, ...] = (
         # the audit's full timeout — the mistake made once already on the
         # graph store's own guard.
         new='        descriptor = os.open(\n            config, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)\n        )',
-        # Pinned on the size bound, which is the only outcome that changes.
-        # A pipe does not work: a non-blocking plain open reads it as empty
-        # and reports what the refusal reports. Nor does a symlink:
-        # `user_data_path` refuses a link before this function opens
-        # anything. Both of those tests are kept for what they do hold, but
-        # neither could tell this line's presence from its absence.
+        # Pinned on the size bound, which is the only outcome a one-line
+        # mutation changes. A pipe does not work here: a non-blocking plain
+        # open reads it as empty and reports what the refusal reports. Nor
+        # does a symlink, which `user_data_path` refuses before this function
+        # opens anything. Both of those tests are kept, and the pipe one is
+        # not idle — a reviewer reverted the whole block to the `read_text`
+        # that shipped before this and watched it fail on a timeout — it just
+        # cannot separate this line from a non-blocking open of the same
+        # file.
         pinned_by="test_a_runtime_config_over_the_bound_is_refused_rather_than_read",
         focus=("tests.test_conformance_contract",),
     ),
     Guard(
         name="doctor: a month refused before it opens is still named",
         relative="agent_harness/journal.py",
-        old='            skipped.append((path.name, "not a plain file"))',
+        old="            skipped.append((path.name, SKIP_NOT_A_PLAIN_FILE))",
         new="            pass",
         pinned_by="test_a_month_refused_before_it_is_opened_is_reported",
         focus=("tests.test_conformance_contract",),
@@ -422,7 +425,7 @@ GUARDS: tuple[Guard, ...] = (
     Guard(
         name="doctor: a month that cannot be opened is named",
         relative="agent_harness/journal.py",
-        old='            skipped.append((path.name, "cannot be opened"))',
+        old="            skipped.append((path.name, SKIP_CANNOT_BE_OPENED))",
         new="            pass",
         pinned_by="test_a_month_that_passes_its_name_and_cannot_be_opened_is_reported",
         focus=("tests.test_conformance_contract",),
@@ -433,6 +436,43 @@ GUARDS: tuple[Guard, ...] = (
         old="        handle = open_month(path)\n        if handle is None:",
         new="        handle = open_month(path)\n        if True:",
         pinned_by="test_a_readable_month_is_not_reported_as_unreadable",
+        focus=("tests.test_conformance_contract",),
+    ),
+    Guard(
+        name="doctor: an unlistable journal directory is reported",
+        relative="agent_harness/journal.py",
+        old='    except (OSError, ValueError):\n        return [("", SKIP_DIRECTORY_UNUSABLE)]',
+        new="    except (OSError, ValueError):\n        return []",
+        pinned_by="test_a_journal_directory_that_cannot_be_listed_is_reported",
+        focus=("tests.test_conformance_contract",),
+    ),
+    Guard(
+        name="doctor: a journal never written is not called broken",
+        relative="agent_harness/journal.py",
+        old="    except FileNotFoundError:",
+        new="    except _NeverRaised:",
+        # Asked of the function directly. The doctor-level fixture runs
+        # `graphctl init` first, which writes a record and so creates the
+        # directory, so it can never reach a journal that does not exist —
+        # an audit reported this guard uncovered for exactly that reason.
+        pinned_by="test_a_journal_directory_that_does_not_exist_is_not_called_unusable",
+        needs_never=True,
+        focus=("tests.test_journal_contract",),
+    ),
+    Guard(
+        name="doctor: a failed stat is not called the wrong kind of file",
+        relative="agent_harness/journal.py",
+        old="            skipped.append((path.name, SKIP_CANNOT_BE_STATED))",
+        new="            skipped.append((path.name, SKIP_NOT_A_PLAIN_FILE))",
+        pinned_by="test_a_month_whose_stat_fails_is_not_called_the_wrong_kind_of_file",
+        focus=("tests.test_conformance_contract",),
+    ),
+    Guard(
+        name="doctor: the listing is asked for rather than globbed",
+        relative="agent_harness/journal.py",
+        old="        with os.scandir(directory) as entries:\n            candidates = sorted(Path(entry.path) for entry in entries)",
+        new='        candidates = sorted(directory.glob("*.jsonl"))',
+        pinned_by="test_a_journal_directory_that_cannot_be_listed_is_reported",
         focus=("tests.test_conformance_contract",),
     ),
     Guard(

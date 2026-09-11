@@ -284,6 +284,12 @@ def _journal_diagnostics() -> dict[str, Any]:
     # assume that was all of them. Which files those are, and why, is the
     # journal's own question; doctor only reports the answer.
     for name, reason in journal.skipped_months():
+        if not name:
+            report["warnings"].append(
+                f"{reason}, so every report is empty rather than short. The "
+                "journal is not missing a month; it is unreachable."
+            )
+            continue
         report["warnings"].append(
             f"The journal file {name} is named like a month and is not read "
             f"({reason}), so every report is missing it."

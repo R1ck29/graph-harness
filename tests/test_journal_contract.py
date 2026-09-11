@@ -772,6 +772,33 @@ class JournalRepositoryReadTests(unittest.TestCase):
         self.assertEqual(["win"], [entry["session_id"] for entry in found])
 
 
+class SkippedMonthTests(unittest.TestCase):
+    """A journal nobody has written is not a journal nobody can read.
+
+    Held here rather than through `doctor`, which cannot reach this case: the
+    fixture there runs `graphctl init` first, and that writes a record, which
+    creates the directory. A mutation audit said so — the doctor-level test
+    passed with this arm removed.
+    """
+
+    def setUp(self) -> None:
+        self._directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._directory.cleanup)
+        self.home = Path(self._directory.name)
+
+    def test_a_journal_directory_that_does_not_exist_is_not_called_unusable(
+        self,
+    ) -> None:
+        self.assertFalse(journal.journal_directory(self.home).exists())
+
+        self.assertEqual([], journal.skipped_months(self.home))
+
+    def test_an_empty_journal_directory_is_not_called_unusable(self) -> None:
+        journal.journal_directory(self.home).mkdir(parents=True)
+
+        self.assertEqual([], journal.skipped_months(self.home))
+
+
 class RepositoryReadEquivalenceTests(unittest.TestCase):
     """The narrowed read must return what the whole read plus a filter did.
 

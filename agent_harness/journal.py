@@ -299,40 +299,83 @@ def month_files(home: str | os.PathLike[str] | None = None) -> list[Path]:
     return [path for path in candidates if is_named_month(path)]
 
 
+# Why a file matching a month's name is not read. `not a plain file` and
+# `cannot be stat-ed` were one reason until a reviewer pointed out that a
+# directory whose mode blocks `lstat` reported two perfectly ordinary months
+# as though they were the wrong kind of file. A reason that misdirects is
+# worse than no reason.
+SKIP_NOT_A_PLAIN_FILE = "not a plain file"
+SKIP_CANNOT_BE_STATED = "cannot be stat-ed"
+SKIP_CANNOT_BE_OPENED = "cannot be opened"
+
+# Why the whole directory is not read. Distinct from the per-file reasons
+# because the consequence is different: one month missing shortens the
+# history, and this loses all of it.
+SKIP_DIRECTORY_UNUSABLE = "the journal directory cannot be listed"
+
+
 def skipped_months(
     home: str | os.PathLike[str] | None = None,
 ) -> list[tuple[str, str]]:
-    """Name every file that looks like a month and is not read, and why.
+    """Name every file matching a month's name that is not read, and why.
 
-    Two silences are worth breaking, and neither is visible to any caller of
-    `read`. A file named like a month that is a link or a pipe never reaches
-    `month_files`, because naming a month and opening one are deliberately
-    separate and the naming check refuses it. A file that passes that check
-    and still cannot be opened — permissions, or larger than the reader's
-    bound — is dropped by `read` with a `continue`.
+    Three silences are worth breaking, and none is visible to any caller of
+    `read`. A file named like a month that is a link, a pipe or a directory
+    never reaches `month_files`, because naming a month and opening one are
+    deliberately separate and the naming check refuses it. One that passes
+    that check and still cannot be opened — permissions, or larger than the
+    reader's bound — is dropped by `read` with a `continue`. And a journal
+    directory that cannot be listed at all makes every reader return nothing:
+    `month_files` gives an empty list, `total_bytes` gives zero, and the
+    history does not look short, it looks absent.
 
-    Either way the history is short by a month and nothing says so, which is
-    the one thing `doctor` exists to prevent: it listed the readable months
-    and left the reader to assume that was all of them.
+    Any of them leaves a report saying less than it seems to, which is the
+    one thing `doctor` exists to prevent: it listed the readable months and
+    left the reader to assume that was all of them.
+
+    Only names matching `MONTH_NAME` are considered. Anything else in the
+    directory was put there by something that is not this module — the only
+    writer is `month_path`, which always produces a matching name — so it is
+    not a month this harness lost.
 
     This never raises, like everything else that reads this directory.
     """
 
     try:
         directory = journal_directory(home)
-        candidates = sorted(directory.glob("*.jsonl"))
     except (HarnessError, OSError, ValueError, RuntimeError):
+        return [("", SKIP_DIRECTORY_UNUSABLE)]
+    # `os.scandir` rather than `Path.glob`, which is how this silence lasted:
+    # pathlib swallows the `PermissionError` from an unreadable directory and
+    # yields nothing, so a journal nobody could list looked exactly like a
+    # journal nobody had written.
+    try:
+        with os.scandir(directory) as entries:
+            candidates = sorted(Path(entry.path) for entry in entries)
+    except FileNotFoundError:
+        # Never written. A journal that does not exist yet is not a broken
+        # one, and every reader already answers nothing for it.
         return []
+    except (OSError, ValueError):
+        return [("", SKIP_DIRECTORY_UNUSABLE)]
     skipped: list[tuple[str, str]] = []
     for path in candidates:
         if not MONTH_NAME.fullmatch(path.name):
             continue
-        if not is_named_month(path):
-            skipped.append((path.name, "not a plain file"))
+        try:
+            plain = stat.S_ISREG(path.lstat().st_mode) and not is_link_like(path)
+        except OSError:
+            # Reported apart from the wrong-type case. A directory whose mode
+            # blocks `lstat` is not a month of the wrong kind, and saying so
+            # sends a reader to replace a file that is already correct.
+            skipped.append((path.name, SKIP_CANNOT_BE_STATED))
+            continue
+        if not plain:
+            skipped.append((path.name, SKIP_NOT_A_PLAIN_FILE))
             continue
         handle = open_month(path)
         if handle is None:
-            skipped.append((path.name, "cannot be opened"))
+            skipped.append((path.name, SKIP_CANNOT_BE_OPENED))
             continue
         # Asked whether it opens, not what is in it. A descriptor held per
         # month would be a leak in the command a broken install is

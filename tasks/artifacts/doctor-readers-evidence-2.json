@@ -1,0 +1,5 @@
+{
+  "criterion": "A journal month that cannot be read is reported by doctor rather than skipped in silence",
+  "kind": "test",
+  "summary": "There are two silences and the first implementation only closed one. A file named like a month that is a link or a pipe never reaches month_files at all, because is_named_month refuses it and naming a month is deliberately separate from opening one - so a loop over month_files, which is what I wrote first, could never see it. journal.skipped_months now answers both: it globs the directory, keeps what matches MONTH_NAME, and reports 'not a plain file' for what the naming check refuses and 'cannot be opened' for what passes it and still fails. The question lives in journal because the layout is its own; doctor only reports the answer. Three tests: a pipe month, a chmod 000 month, and two readable months that must produce no warning - the last because a check written the wrong way round would warn about every month while looking right. The handle open_month returns is closed immediately, since this asks whether a month opens and not what is in it, and a descriptor per month would be a leak in this command."
+}

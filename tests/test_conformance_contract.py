@@ -390,6 +390,57 @@ class DoctorDiagnosticsTests(unittest.TestCase):
         self.assertIn("2026-06.jsonl is named like a month and is not read", warnings)
         self.assertIn("cannot be opened", warnings)
 
+    @unittest.skipIf(os.name == "nt", "POSIX directory permissions")
+    def test_a_journal_directory_that_cannot_be_listed_is_reported(self) -> None:
+        # The silence one level up from a missing month, and the worst of
+        # them: every reader returns nothing, so the history does not look
+        # short, it looks absent. It lasted because `Path.glob` swallows the
+        # PermissionError from an unreadable directory and yields nothing, so
+        # a journal nobody could list was indistinguishable from one nobody
+        # had written.
+        months = self._months()
+        self._month(months / "2026-06.jsonl")
+        months.chmod(0o000)
+        self.addCleanup(months.chmod, 0o700)
+
+        report = self._diagnose()
+        warnings = " ".join(report["warnings"])
+
+        self.assertEqual([], report["journal_months"])
+        self.assertIn("cannot be listed", warnings)
+        self.assertIn("empty rather than short", warnings)
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory permissions")
+    def test_a_month_whose_stat_fails_is_not_called_the_wrong_kind_of_file(
+        self,
+    ) -> None:
+        # A reason that misdirects is worse than no reason. With the
+        # directory listable but its children unstattable, two perfectly
+        # ordinary months were reported as though they were pipes or links,
+        # which sends a reader to replace a file that is already correct.
+        months = self._months()
+        self._month(months / "2026-06.jsonl")
+        months.chmod(0o400)
+        self.addCleanup(months.chmod, 0o700)
+
+        report = self._diagnose()
+        warnings = " ".join(report["warnings"])
+
+        self.assertIn("2026-06.jsonl", warnings)
+        self.assertIn("cannot be stat-ed", warnings)
+        self.assertNotIn("not a plain file", warnings)
+
+    def test_a_first_run_does_not_report_the_journal_as_unusable(self) -> None:
+        # Through doctor, which is where it matters. This cannot reach the
+        # never-written case on its own — `graphctl init` writes a record and
+        # so creates the directory before `doctor` reads it — so that arm is
+        # held by `tests.test_journal_contract.SkippedMonthTests`, asking the
+        # function directly. An audit reported the guard uncovered until it
+        # was moved there.
+        report = self._diagnose()
+
+        self.assertEqual([], [w for w in report["warnings"] if "cannot be listed" in w])
+
     def test_a_readable_month_is_not_reported_as_unreadable(self) -> None:
         # The other half: the warning must not fire for every month, which a
         # check written the wrong way round would do while looking right.
