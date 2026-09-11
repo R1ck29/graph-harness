@@ -17,9 +17,11 @@ can carry doubt that a one-line warning cannot.
 from __future__ import annotations
 
 import os
+from bisect import bisect_right
 from typing import Any, Iterable
 
 from . import codex_sessions, journal, session_hooks, worktree
+from .errors import HarnessError
 
 # Version 3 adds `bounds`, which says what a verdict's two timestamps
 # describe. Version 2 was the shape before that: `read_only` became
@@ -34,6 +36,7 @@ SCHEMA_VERSION = 3
 # and only the first can support a claim that two sessions ran together.
 BOUNDS_OBSERVED = "observed"
 BOUNDS_THREAD_LIFETIME = "thread_lifetime"
+BOUNDS = (BOUNDS_OBSERVED, BOUNDS_THREAD_LIFETIME)
 
 # What a verdict is worth. A session the client recorded closing was observed
 # to its end; one that only opened may still have been running when the record
@@ -204,29 +207,94 @@ def _contested(verdicts: list[dict[str, Any]]) -> None:
     Only sessions whose window was observed take part, which is what the
     `bounds` field on each verdict says. A Codex verdict's window comes from
     the store's `created_at` and `updated_at`, and `updated_at` is the thread
-    row's last-modified time rather than the moment the session ended: on a
-    real store of 137 threads the median span is six minutes but thirteen
-    span more than a day and the longest is twenty-four. Letting those
-    windows contest anything marked 118 of those 137 as contested by each
-    other, and marked a fully observed session — one with its own edit
-    records and a graph transition inside its window — as contested by a
-    Codex row whose lifetime merely spanned it. That session's changes are
-    attributable to it alone, so the flag was saying something false.
+    row's last-modified time rather than the moment the session ended.
+    Measured on a real store, counting only the rows that become verdicts —
+    subagent threads are filtered out before they reach here, and they were
+    108 of the 137 rows — nine of twenty-nine windows span more than a day
+    and the widest is twenty-four. Letting those contest anything marked
+    five of the twenty-nine as contested by each other, and marked a fully
+    observed session — one with its own edit records and a graph transition
+    inside its window — as contested by a Codex row whose lifetime merely
+    spanned it. That session's changes are attributable to it alone, so the
+    flag was saying something false.
     """
 
     by_repo: dict[str, list[dict[str, Any]]] = {}
     for verdict in verdicts:
         verdict["contested"] = False
-        if verdict.get("bounds") == BOUNDS_OBSERVED:
+        bounds = verdict.get("bounds")
+        if bounds not in BOUNDS:
+            # A producer that omitted the field would otherwise be excluded
+            # from contesting in silence, which is the failure mode this
+            # whole field exists to prevent: a verdict quietly exempt from a
+            # comparison reads exactly like one that was compared and found
+            # alone. Both producers here set it, so reaching this is a bug in
+            # a third one, and it should say so rather than answer.
+            raise HarnessError(
+                f"verdict for session {verdict.get('session_id')!r} does not "
+                f"say what its timestamps describe; expected one of {BOUNDS}"
+            )
+        if bounds == BOUNDS_OBSERVED:
             by_repo.setdefault(verdict["repo"], []).append(verdict)
     for group in by_repo.values():
-        for first in group:
-            for second in group:
-                if first is second:
-                    continue
-                if _overlaps(first, second):
-                    first["contested"] = True
-                    break
+        _mark_overlaps(group)
+
+
+def _mark_overlaps(group: list[dict[str, Any]]) -> None:
+    """Mark each session in *group* that shared its window with another.
+
+    Every pair used to be compared, which is fine until it is not: a single
+    checkout accumulates sessions, and the non-overlapping case — sequential
+    work, the normal one — paid the full square because nothing let the loop
+    stop early. Measured at 0.33s for 500 sessions and 5.36s for 2000, the
+    latter being almost all of a report's runtime, and 2000 is eleven
+    sessions a day across the six months the journal keeps.
+
+    So the search is narrowed and the question is left alone. Sorted by
+    start, the sessions that can possibly overlap *i* are those starting no
+    later than *i* ends — a prefix, found by bisection — and within it only
+    the one reaching furthest matters, because every candidate already
+    satisfies the second half of the predicate and the first half asks for
+    the largest end. That candidate is then handed to `_overlaps`, so the
+    predicate still has exactly one implementation and this function only
+    decides who to ask about.
+
+    Two largest ends are tracked rather than one, so a session is never
+    compared against itself. Sessions missing a bound are left out of the
+    ordering entirely, which is what the pairwise version did by answering
+    False for every pair involving one.
+    """
+
+    ordered = sorted(
+        (verdict for verdict in group if _bounded(verdict)),
+        key=lambda verdict: (verdict["started_at"], verdict["ended_at"]),
+    )
+    if len(ordered) < 2:
+        return
+    starts = [str(verdict["started_at"]) for verdict in ordered]
+    # `prefix[k]` is the two furthest-reaching sessions among the first k,
+    # each as (ended_at, index).
+    prefix: list[tuple[tuple[str, int], tuple[str, int]]] = [(("", -1), ("", -1))]
+    top, second = ("", -1), ("", -1)
+    for index, verdict in enumerate(ordered):
+        reach = (str(verdict["ended_at"]), index)
+        if reach > top:
+            top, second = reach, top
+        elif reach > second:
+            second = reach
+        prefix.append((top, second))
+    for index, verdict in enumerate(ordered):
+        candidates = bisect_right(starts, str(verdict["ended_at"]))
+        best, runner_up = prefix[candidates]
+        chosen = runner_up if best[1] == index else best
+        if chosen[1] >= 0 and _overlaps(verdict, ordered[chosen[1]]):
+            verdict["contested"] = True
+
+
+def _bounded(verdict: dict[str, Any]) -> bool:
+    """Report whether both ends of *verdict* were recorded as timestamps."""
+
+    return all(isinstance(verdict.get(key), str) for key in ("started_at", "ended_at"))
 
 
 def _overlaps(first: dict[str, Any], second: dict[str, Any]) -> bool:

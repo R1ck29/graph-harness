@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import itertools
 import json
 import os
+import random
 import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from typing import Any
@@ -695,12 +698,12 @@ class UnobservedWindowTests(unittest.TestCase):
 
     Rendering Codex's timestamps into the hooks' form made them comparable,
     and that turned out to be the wrong thing to act on. `updated_at` is when
-    the thread row was last written, not when the session ended: a reviewer
-    measured a real store of 137 threads where the median span is six minutes
-    but thirteen span over a day and the longest is twenty-four. Acting on
-    those windows marked 118 of the 137 as contested by each other, and
-    marked a fully observed session as contested by a row that merely spanned
-    it.
+    the thread row was last written, not when the session ended. Counting
+    only the rows that become verdicts — subagent threads never reach the
+    report — a reviewer measured nine of twenty-nine windows spanning over a
+    day on a real store, the widest twenty-four days. Acting on those marked
+    five of the twenty-nine as contested by each other, and marked a fully
+    observed session as contested by a row that merely spanned it.
     """
 
     def setUp(self) -> None:
@@ -808,6 +811,19 @@ class UnobservedWindowTests(unittest.TestCase):
             [True, True], [item["contested"] for item in report["sessions"]]
         )
 
+    def test_a_verdict_that_says_nothing_about_its_window_is_refused(
+        self,
+    ) -> None:
+        # The failure mode the field exists to prevent, applied to the field
+        # itself: a verdict quietly exempt from the comparison reads exactly
+        # like one that was compared and found alone, so a producer that
+        # forgot to say which kind of window it carries must not be answered
+        # silently.
+        with self.assertRaisesRegex(HarnessError, "does not say what its"):
+            conformance._contested(
+                [{"session_id": "nameless", "repo": "/repo", "contested": False}]
+            )
+
     def test_every_verdict_says_what_its_timestamps_describe(self) -> None:
         # A reader comparing two sessions has to be able to tell which pair
         # was observed, so the distinction is in the report rather than only
@@ -821,6 +837,137 @@ class UnobservedWindowTests(unittest.TestCase):
         self.assertEqual("thread_lifetime", bounds["codex"])
         self.assertEqual("observed", bounds["hook"])
         self.assertEqual(3, report["schema_version"])
+
+
+class ContestedEquivalenceTests(unittest.TestCase):
+    """The narrowed search must answer exactly what comparing every pair did.
+
+    The pairwise version is the specification, so it is written out here and
+    the two are held equal over generated groups rather than argued about.
+    The cases that matter are the ones a reader would not think to try: a
+    session missing one bound, a session whose end precedes its start, two
+    sessions with identical windows, and a session that touches another only
+    at an endpoint.
+    """
+
+    WINDOWS = (
+        ("2026-09-01T00:00:00+00:00", "2026-09-01T00:00:10+00:00"),
+        ("2026-09-01T00:00:05+00:00", "2026-09-01T00:00:15+00:00"),
+        ("2026-09-01T00:00:10+00:00", "2026-09-01T00:00:20+00:00"),
+        ("2026-09-01T00:00:20+00:00", "2026-09-01T00:00:20+00:00"),
+        ("2026-09-01T00:00:30+00:00", "2026-09-01T00:00:25+00:00"),
+        ("2026-09-01T00:00:00+00:00", "2026-09-01T00:00:10+00:00"),
+        (None, "2026-09-01T00:00:10+00:00"),
+        ("2026-09-01T00:00:00+00:00", None),
+        (None, None),
+    )
+
+    @staticmethod
+    def _pairwise(group: list[dict[str, Any]]) -> list[bool]:
+        """The implementation this replaces, kept as the specification."""
+
+        answers = []
+        for first in group:
+            overlapped = False
+            for second in group:
+                if first is second:
+                    continue
+                if conformance._overlaps(first, second):
+                    overlapped = True
+                    break
+            answers.append(overlapped)
+        return answers
+
+    def _group(self, rng: random.Random) -> list[dict[str, Any]]:
+        group: list[dict[str, Any]] = []
+        for index in range(rng.randint(0, 9)):
+            started, ended = rng.choice(self.WINDOWS)
+            group.append(
+                {
+                    "session_id": f"s{index}",
+                    "repo": "/repo",
+                    "started_at": started,
+                    "ended_at": ended,
+                    "contested": False,
+                    "bounds": conformance.BOUNDS_OBSERVED,
+                }
+            )
+        return group
+
+    def test_the_narrowed_search_agrees_with_comparing_every_pair(self) -> None:
+        rng = random.Random(20260911)
+        for trial in range(500):
+            with self.subTest(trial=trial):
+                group = self._group(rng)
+                expected = self._pairwise(group)
+
+                for verdict in group:
+                    verdict["contested"] = False
+                conformance._mark_overlaps(group)
+
+                self.assertEqual(
+                    expected, [bool(verdict["contested"]) for verdict in group]
+                )
+
+    def test_it_agrees_whatever_order_the_sessions_arrive_in(self) -> None:
+        # The pairwise version could not depend on order; a sorted sweep can,
+        # so every permutation of a small group is checked rather than one
+        # arrangement of a large one.
+        group = [
+            {
+                "session_id": f"s{index}",
+                "repo": "/repo",
+                "started_at": started,
+                "ended_at": ended,
+                "contested": False,
+                "bounds": conformance.BOUNDS_OBSERVED,
+            }
+            for index, (started, ended) in enumerate(self.WINDOWS[:5])
+        ]
+        for order in itertools.permutations(range(len(group))):
+            arranged = [group[index] for index in order]
+            expected = self._pairwise(arranged)
+
+            for verdict in arranged:
+                verdict["contested"] = False
+            conformance._mark_overlaps(arranged)
+
+            self.assertEqual(
+                expected,
+                [bool(verdict["contested"]) for verdict in arranged],
+                f"order {order}",
+            )
+
+    def test_a_thousand_sequential_sessions_are_not_compared_pairwise(self) -> None:
+        # The cost, not the answer. Sequential non-overlapping sessions were
+        # the worst case for the pairwise version because nothing let it stop
+        # early, so that is what is measured; the bound is loose enough to
+        # survive a slow machine and far below the quadratic cost.
+        base = 1788000000
+        group = [
+            {
+                "session_id": f"s{index}",
+                "repo": "/repo",
+                "started_at": utc_from_epoch(base + index * 10),
+                "ended_at": utc_from_epoch(base + index * 10 + 5),
+                "contested": False,
+                "bounds": conformance.BOUNDS_OBSERVED,
+            }
+            for index in range(1000)
+        ]
+
+        started = time.monotonic()
+        conformance._mark_overlaps(group)
+        swept = time.monotonic() - started
+
+        started = time.monotonic()
+        self._pairwise(group)
+        pairwise = time.monotonic() - started
+
+        self.assertEqual([], [v for v in group if v["contested"]])
+        self.assertLess(
+            swept, pairwise / 5, f"swept {swept:.3f}s pairwise {pairwise:.3f}s"
+        )
 
 
 class EscapeHatchTransitionTests(unittest.TestCase):

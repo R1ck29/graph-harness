@@ -138,12 +138,18 @@ one directory.
 | `unobserved` | no opening record |
 | `bypass_suspected` | a Codex session, which runs no hooks at all, so its window is a row lifetime rather than a run |
 
-Each verdict carries `confidence`, `changed_files` and `edits`, the tree
-context, and two fields about time. `bounds` says what the verdict's
-`started_at` and `ended_at` describe: `observed` when the hooks recorded the
-session opening and closing, `thread_lifetime` when they came from Codex's own
-store, where the second value is when the thread row was last written rather
-than when the session ended. `contested` is set when another session in the
+Each verdict carries `confidence`, `changed_files` and `edits`, and two
+fields about time. The tree context is there only for a session that was
+observed from end to end: an `unobserved`, `incomplete` or Codex verdict
+carries no `tree_changed`, `tree_files` or `tree_lines` at all, because
+nothing was compared. `bounds` says where the verdict's
+`started_at` and `ended_at` came from: `observed` when they came from the
+hooks' own records, `thread_lifetime` when they came from Codex's store, where
+the second value is when the thread row was last written rather than when the
+session ended. `observed` says the source, not that both ends were seen — an
+`incomplete` or `unobserved` verdict is hook-sourced and still missing one or
+both, which `contested` handles by requiring both ends before comparing
+anything. `contested` is set when another session in the
 same repository overlapped it, and only `observed` windows take part — a
 Codex row's lifetime can run to weeks, and letting one contest anything told a
 session that had followed the protocol its work might belong to something
