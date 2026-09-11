@@ -1,0 +1,5 @@
+{
+  "criterion": "The records it parses are limited to the repository it was asked about, and the answer is unchanged for every case the existing tests cover",
+  "kind": "observation",
+  "summary": "One answer does change, and for the better. The reviewer's remaining disagreement is _cut_position: it scanned the whole history and matched only (event, session_id, ts), so a record from another repository colliding on that triple at a later position gated this repository's cut - reduced to a minimal case printing old cut 6 against new cut 5, which changed a reported edit count from 6 to 5. Nothing wanted that behaviour and the docstring now states the precondition it depended on. All 83 tests in tests.test_session_hook_contract pass unchanged. Suites on a clean HEAD export: 400 OK on 3.12.12 and 400 OK on 3.10.19. Measured on 40,000 records across 50 checkouts (13.1 MB): 0.084s to 0.014s, a 6.1x reduction."
+}

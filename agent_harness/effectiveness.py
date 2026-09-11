@@ -24,7 +24,16 @@ from typing import Any, Iterable
 
 from . import conformance
 from .errors import HarnessError
-from .paths import is_link_like, workspace_path
+from .paths import (
+    REFUSAL_NOT_A_REGULAR_FILE,
+    REFUSAL_SYMLINK,
+    REFUSAL_TOO_LARGE,
+    REFUSAL_UNREADABLE,
+    FileRefusal,
+    is_link_like,
+    open_bounded_regular_file,
+    workspace_path,
+)
 from .storage import MAX_GRAPH_BYTES
 
 # 2 because `unreadable` changed shape: it was a list of path strings and is
@@ -57,11 +66,11 @@ SCHEMA_VERSION = 2
 # sits *inside* the workspace was reported as outside it — telling the reader
 # to point somewhere else when the fix is to replace the link. A reason that
 # misdirects is worse than the bare path it replaced.
+# Four of these are the primitive's own, imported rather than restated so a
+# report cannot name a refusal the reader cannot make. The other two are this
+# function's: confinement is a rule about where a path may point, and
+# malformed is about the bytes, neither of which the opener judges.
 REFUSAL_OUTSIDE_WORKSPACE = "outside_workspace"
-REFUSAL_SYMLINK = "symlink"
-REFUSAL_NOT_A_REGULAR_FILE = "not_a_regular_file"
-REFUSAL_TOO_LARGE = "too_large"
-REFUSAL_UNREADABLE = "unreadable"
 REFUSAL_MALFORMED = "malformed"
 
 # Every reason `_load` can return, for anything that needs the whole set:
@@ -336,16 +345,14 @@ def _load(path: str | os.PathLike[str]) -> tuple[dict[str, Any] | None, str]:
         # refusing, which breaks the one contract it has.
         return None, REFUSAL_UNREADABLE
     try:
-        stats = confined.lstat()
-        # A size bound is not a time bound. A FIFO named like a graph has a
-        # size of zero, passes any byte limit, and then blocks the read for
-        # ever. This is the defect the journal reader closed one file over,
-        # and the same answer applies: judge the type, not just the size.
-        if not stat.S_ISREG(stats.st_mode):
-            return None, REFUSAL_NOT_A_REGULAR_FILE
-        if stats.st_size > MAX_REPORT_GRAPH_BYTES:
-            return None, REFUSAL_TOO_LARGE
-        text = confined.read_text(encoding="utf-8")
+        descriptor = open_bounded_regular_file(confined, MAX_REPORT_GRAPH_BYTES)
+    except FileRefusal as exc:
+        return None, exc.reason
+    except OSError:
+        return None, REFUSAL_UNREADABLE
+    try:
+        with os.fdopen(descriptor, "rb") as handle:
+            text = handle.read().decode("utf-8")
     except OSError:
         return None, REFUSAL_UNREADABLE
     except UnicodeDecodeError:

@@ -76,18 +76,29 @@ class Guard:
 
 GUARDS: tuple[Guard, ...] = (
     Guard(
-        name="journal read: O_NOFOLLOW",
-        relative="agent_harness/journal.py",
-        old='flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | non_blocking',
-        new="flags = os.O_RDONLY | non_blocking",
-        pinned_by="test_open_month_refuses_a_symlink_even_when_it_is_reached_directly",
+        # This guard and the three below moved with the code. They used to
+        # sit inside `journal.open_month` and `effectiveness._load`, which
+        # had worked the same rules out separately; they now describe the one
+        # primitive every reader of an untrusted file shares. The tests that
+        # pin them are still the ones written against those two readers,
+        # which is the point: a shared primitive has to keep both contracts.
+        name="bounded open: refuse a symlink",
+        relative="agent_harness/paths.py",
+        old="    if stat.S_ISLNK(initial.st_mode):\n        raise FileRefusal(REFUSAL_SYMLINK, path)",
+        new="    if False:\n        raise FileRefusal(REFUSAL_SYMLINK, path)",
+        # Pinned on the refusal happening before the open rather than on a
+        # symlink being refused: `O_NOFOLLOW` refuses one too, and it is zero
+        # on Windows, so a test that checks only the outcome passes on POSIX
+        # whether this line is here or not — which is what an audit on macOS
+        # reported when it called this guard uncovered.
+        pinned_by="test_a_symlink_is_refused_before_it_is_opened",
         focus=("tests.test_journal_contract",),
     ),
     Guard(
-        name="journal read: clear O_NONBLOCK only where set",
-        relative="agent_harness/journal.py",
-        old="        if non_blocking:",
-        new='        if hasattr(os, "set_blocking"):',
+        name="bounded open: clear O_NONBLOCK only where it was set",
+        relative="agent_harness/paths.py",
+        old="        if non_blocking:\n            os.set_blocking(descriptor, True)",
+        new='        if hasattr(os, "set_blocking"):\n            os.set_blocking(descriptor, True)',
         pinned_by="test_a_platform_without_o_nonblock_still_reads_its_months",
         focus=("tests.test_journal_contract",),
     ),
@@ -117,17 +128,21 @@ GUARDS: tuple[Guard, ...] = (
         focus=("tests.test_effectiveness_contract",),
     ),
     Guard(
-        name="report loader: regular-file check",
-        relative="agent_harness/effectiveness.py",
-        old="        if not stat.S_ISREG(stats.st_mode):",
-        new="        if False:",
-        pinned_by="test_a_graph_that_is_not_a_regular_file_cannot_hang_the_report",
-        focus=("tests.test_effectiveness_contract",),
+        name="bounded open: refuse anything that is not a regular file",
+        relative="agent_harness/paths.py",
+        old="    if not stat.S_ISREG(initial.st_mode):\n        raise FileRefusal(REFUSAL_NOT_A_REGULAR_FILE, path)",
+        new="    if False:\n        raise FileRefusal(REFUSAL_NOT_A_REGULAR_FILE, path)",
+        # The `fstat` after the open refuses a FIFO as well, and reaching it
+        # is only safe because `O_NONBLOCK` is non-zero here. Where it is
+        # zero, removing this line blocks for ever instead of failing, so the
+        # test asserts that nothing was opened.
+        pinned_by="test_a_named_pipe_is_refused_before_it_is_opened",
+        focus=("tests.test_journal_contract",),
     ),
     Guard(
-        name="report loader: size bound",
-        relative="agent_harness/effectiveness.py",
-        old="        if stats.st_size > MAX_REPORT_GRAPH_BYTES:",
+        name="bounded open: refuse a file over the caller's bound",
+        relative="agent_harness/paths.py",
+        old="        if opened.st_size > max_bytes:",
         new="        if False:",
         pinned_by="test_a_graph_above_the_storage_bound_is_refused_not_read",
         focus=("tests.test_effectiveness_contract",),
@@ -294,6 +309,38 @@ GUARDS: tuple[Guard, ...] = (
         new='SHEDDABLE_FIELDS = ("snapshot", "reason", "source", "actor", "command", "repo")',
         pinned_by="test_a_record_that_cannot_name_its_repository_is_not_written",
         focus=("tests.test_journal_contract",),
+    ),
+    Guard(
+        name="bounded open: the fstat after the open refuses a FIFO too",
+        relative="agent_harness/paths.py",
+        old="        if not stat.S_ISREG(opened.st_mode):\n            raise FileRefusal(REFUSAL_NOT_A_REGULAR_FILE, path)",
+        new="        if False:\n            raise FileRefusal(REFUSAL_NOT_A_REGULAR_FILE, path)",
+        # Pinned on the window this check exists for, not on a FIFO being
+        # refused: the `lstat` check above answers that first, so an audit
+        # reported this guard uncovered. The test hands the pre-open check
+        # the stat of a regular file while the path is a pipe.
+        pinned_by="test_a_pipe_that_looked_regular_is_refused_after_the_open",
+        focus=("tests.test_journal_contract",),
+    ),
+    Guard(
+        name="bounded open: the descriptor is the file that was asked for",
+        relative="agent_harness/paths.py",
+        old="        if (opened.st_dev, opened.st_ino) != (initial.st_dev, initial.st_ino):",
+        new="        if False:",
+        pinned_by="test_a_file_swapped_for_another_between_the_checks_is_refused",
+        focus=("tests.test_journal_contract",),
+    ),
+    Guard(
+        name="graph store: reads through the bounded opener",
+        relative="agent_harness/storage.py",
+        old="            descriptor = open_bounded_regular_file(self.path, MAX_GRAPH_BYTES)",
+        # Opened non-blocking rather than plainly. A plain `os.open` on the
+        # FIFO the pinning test creates blocks for ever, so the mutant hung
+        # the suite and the audit died on its own 900-second timeout instead
+        # of reporting anything. A mutation has to fail, not wait.
+        new='            descriptor = os.open(\n                self.path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)\n            )',
+        pinned_by="test_a_graph_reached_through_a_symlink_is_refused",
+        focus=("tests.test_storage_and_cli_contract",),
     ),
     Guard(
         name="lock: retry on Windows access-denied",

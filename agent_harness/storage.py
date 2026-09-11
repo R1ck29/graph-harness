@@ -13,6 +13,12 @@ from typing import Any, Callable, Iterator
 
 from .errors import HarnessError
 from .graph import Graph
+from .paths import (
+    REFUSAL_TOO_LARGE,
+    FileRefusal,
+    is_link_like,
+    open_bounded_regular_file,
+)
 
 MAX_GRAPH_BYTES = 4 * 1024 * 1024
 
@@ -86,19 +92,41 @@ class GraphStore:
         self.lock_path = self.path.with_suffix(self.path.suffix + ".lock")
 
     def load(self) -> Graph:
-        try:
-            if self.path.stat().st_size > MAX_GRAPH_BYTES:
-                raise HarnessError(f"graph file exceeds {MAX_GRAPH_BYTES} bytes")
-            with self.path.open("r", encoding="utf-8") as handle:
-                document = json.load(handle)
-        except FileNotFoundError as exc:
+        """Read the graph, refusing anything that is not a bounded regular file.
+
+        Through the same primitive every other reader of an untrusted file
+        uses. This one had none of its guards: a `task-graph.json` that was a
+        FIFO has a size of zero, passed the byte limit, and then blocked
+        `validate`, `status`, `doctor`, `completion-check` and the installed
+        Stop hook for ever — verified by a reviewer against the path
+        `claude_hook.main` takes. A symlink was refused only because the two
+        callers happened to resolve through `workspace_path` first, which is
+        their choice rather than this function's contract.
+        """
+
+        if not self.path.exists() and not is_link_like(self.path):
             raise HarnessError(
                 f"graph file not found: {self.path}; run the command from the "
                 "directory that holds the graph, or create one with "
                 "'graphctl init'"
+            )
+        try:
+            descriptor = open_bounded_regular_file(self.path, MAX_GRAPH_BYTES)
+        except FileRefusal as exc:
+            if exc.reason == REFUSAL_TOO_LARGE:
+                raise HarnessError(
+                    f"graph file exceeds {MAX_GRAPH_BYTES} bytes"
+                ) from exc
+            raise HarnessError(
+                f"graph file cannot be read ({exc.reason}): {self.path}"
             ) from exc
+        try:
+            with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+                document = json.load(handle)
         except (json.JSONDecodeError, RecursionError) as exc:
             raise HarnessError(f"invalid JSON in {self.path}: {exc}") from exc
+        except (OSError, UnicodeDecodeError) as exc:
+            raise HarnessError(f"graph file cannot be read: {self.path}") from exc
         if not isinstance(document, dict):
             raise HarnessError("graph document must be a JSON object")
         return Graph(document)

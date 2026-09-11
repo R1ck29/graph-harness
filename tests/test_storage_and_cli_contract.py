@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,67 @@ class GraphStoreTests(unittest.TestCase):
             self.assertEqual(original.to_dict(), restored.to_dict())
             self.assertTrue(path.exists())
             self.assertEqual([], list(Path(directory).glob("*.tmp")))
+
+    @unittest.skipIf(os.name == "nt", "POSIX named pipe")
+    def test_a_graph_that_is_a_named_pipe_is_refused_rather_than_read(self) -> None:
+        # The defect this node exists for. A FIFO named `task-graph.json` has
+        # a size of zero, so it passed the byte limit the store checked, and
+        # then `open` blocked for ever — taking `validate`, `status`,
+        # `doctor`, `completion-check` and the installed Stop hook with it.
+        # The report loader and the journal reader had each closed this on
+        # their own; the store, which every command reads through, had not.
+        #
+        # Driven on a thread that is joined with a deadline, rather than by
+        # calling and timing it. A test for something that must not block
+        # cannot be allowed to block: asserting on the elapsed time only
+        # works if the call returns, and the first version of this test hung
+        # the whole suite for fifteen minutes under a mutation that removed
+        # the guard. The thread is a daemon so a blocked one cannot keep the
+        # interpreter alive either.
+        with tempfile.TemporaryDirectory(dir=workspace_root()) as directory:
+            path = Path(directory) / "task-graph.json"
+            os.mkfifo(path)
+            outcome: list[object] = []
+
+            def attempt() -> None:
+                try:
+                    outcome.append(GraphStore(path).load())
+                except BaseException as exc:  # noqa: BLE001 - reported below
+                    outcome.append(exc)
+
+            thread = threading.Thread(target=attempt, daemon=True)
+            thread.start()
+            thread.join(15.0)
+
+            self.assertFalse(thread.is_alive(), "the read blocked on the pipe")
+            self.assertEqual(1, len(outcome))
+            refusal = outcome[0]
+            self.assertIsInstance(refusal, HarnessError)
+            self.assertIn("not_a_regular_file", str(refusal))
+
+    @unittest.skipIf(os.name == "nt", "POSIX symlink")
+    def test_a_graph_reached_through_a_symlink_is_refused(self) -> None:
+        # Refused by the store itself, not by the caller. Both of today's
+        # callers resolve through `workspace_path` first, which refuses a
+        # link-like component — but that is their choice, and a third caller
+        # reading the store directly inherited nothing.
+        with tempfile.TemporaryDirectory(dir=workspace_root()) as directory:
+            real = Path(directory) / "real-graph.json"
+            GraphStore(real).save(Graph.from_dict(graph(node("plan"))))
+            link = Path(directory) / "task-graph.json"
+            link.symlink_to(real)
+
+            with self.assertRaisesRegex(HarnessError, "symlink"):
+                GraphStore(link).load()
+
+    def test_a_missing_graph_still_says_how_to_create_one(self) -> None:
+        # The message a person sees most often, and the one thing the new
+        # refusals must not have replaced with an errno.
+        with tempfile.TemporaryDirectory(dir=workspace_root()) as directory:
+            path = Path(directory) / "task-graph.json"
+
+            with self.assertRaisesRegex(HarnessError, "graph file not found"):
+                GraphStore(path).load()
 
 
 class GraphCtlAtomicityTests(unittest.TestCase):

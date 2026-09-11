@@ -18,7 +18,12 @@ from . import journal, paths
 from .claude_hook import MINIMUM_PYTHON
 from .errors import HarnessError
 from .graph import Graph
-from .paths import repository_key, user_data_path, workspace_path
+from .paths import (
+    open_bounded_regular_file,
+    repository_key,
+    user_data_path,
+    workspace_path,
+)
 from .storage import MAX_GRAPH_BYTES, FileLock, GraphStore
 
 MAX_EVIDENCE_FILE_BYTES = 1_048_576
@@ -42,25 +47,29 @@ MUTATING_COMMANDS = frozenset(
 
 
 def _read_evidence_file(path: Path) -> str:
-    """Read one bounded regular file without following a replaced leaf link."""
+    """Read one bounded regular file without following a replaced leaf link.
 
-    initial = path.lstat()
-    if not stat.S_ISREG(initial.st_mode):
-        raise HarnessError(f"evidence path must be a regular file: {path}")
-    flags = os.O_RDONLY
-    flags |= getattr(os, "O_BINARY", 0)
-    flags |= getattr(os, "O_NONBLOCK", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
+    This function was where the four guards were worked out; they now live in
+    `paths.open_bounded_regular_file`, which the graph store, the journal
+    reader and the report loader all share. What stays here is the part that
+    is this command's own: the bound it applies and the words it fails with,
+    which a person typing `graphctl submit` has to be able to act on.
+
+    The size is still checked again after reading. A file that grew between
+    the `fstat` and the read would otherwise pass the bound and arrive over
+    it, and the whole point of the bound is that nothing unbounded reaches
+    the graph.
+    """
+
     try:
-        opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (
-            initial.st_dev,
-            initial.st_ino,
-        ):
-            raise HarnessError(f"evidence file changed while it was inspected: {path}")
-        if opened.st_size > MAX_EVIDENCE_FILE_BYTES:
-            raise HarnessError("evidence file exceeds 1 MiB")
+        descriptor = open_bounded_regular_file(path, MAX_EVIDENCE_FILE_BYTES)
+    except paths.FileRefusal as exc:
+        if exc.reason == paths.REFUSAL_TOO_LARGE:
+            raise HarnessError("evidence file exceeds 1 MiB") from exc
+        if exc.reason == paths.REFUSAL_NOT_A_REGULAR_FILE:
+            raise HarnessError(f"evidence path must be a regular file: {path}") from exc
+        raise HarnessError(f"evidence file cannot be read: {path}") from exc
+    try:
         chunks: list[bytes] = []
         remaining = MAX_EVIDENCE_FILE_BYTES + 1
         while remaining:

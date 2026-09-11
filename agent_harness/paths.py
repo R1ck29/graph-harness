@@ -225,6 +225,90 @@ def blocking_ancestor(relative: str | os.PathLike[str]) -> Path | None:
     return None
 
 
+# Why one path was refused. The reasons are named rather than described so a
+# caller can turn each into its own message, or report it to a person, without
+# parsing prose.
+REFUSAL_SYMLINK = "symlink"
+REFUSAL_NOT_A_REGULAR_FILE = "not_a_regular_file"
+REFUSAL_TOO_LARGE = "too_large"
+REFUSAL_UNREADABLE = "unreadable"
+
+
+class FileRefusal(HarnessError):
+    """Raised when a file must not be read, naming the rule that refused it."""
+
+    def __init__(self, reason: str, path: Path, detail: str = "") -> None:
+        self.reason = reason
+        self.path = path
+        super().__init__(detail or f"{reason}: {path}")
+
+
+def open_bounded_regular_file(path: Path, max_bytes: int) -> int:
+    """Return a descriptor on *path*, or refuse it, and never block.
+
+    Every reader of a file this harness did not write needs the same four
+    answers, and each one that worked them out for itself got a different
+    subset. The graph store got none of them: `task-graph.json` as a FIFO has
+    a size of zero, passes any byte limit, and blocks `validate`, `status`,
+    `doctor`, `completion-check` and the installed Stop hook for ever.
+
+    ``O_NOFOLLOW`` refuses a symlink outright. ``O_NONBLOCK`` means a FIFO
+    with no writer returns a descriptor instead of blocking, which is the
+    defect this exists for: ``open`` raising was handled everywhere, ``open``
+    *blocking* was handled in one place. ``fstat`` then rejects anything that
+    is not a regular file, and the size is read from the descriptor already
+    held rather than from a second ``stat``, so nothing can be swapped in
+    between the two.
+
+    The identity recheck compares the descriptor against an ``lstat`` taken
+    first, which is what catches a leaf replaced between the two calls on a
+    platform whose ``O_NOFOLLOW`` does not.
+
+    ``O_NONBLOCK`` is cleared before returning, where the platform has both
+    the flag and a way to clear it. Windows has neither below 3.12 and gained
+    ``os.set_blocking`` without gaining ``O_NONBLOCK``, so the call is gated
+    on the flag rather than on the function: gating it on the function set a
+    blocking mode that failed on a regular file, and the whole journal read
+    as unreadable on Windows 3.13 while passing on Windows 3.10.
+    """
+
+    try:
+        initial = path.lstat()
+    except OSError as exc:
+        raise FileRefusal(REFUSAL_UNREADABLE, path) from exc
+    if stat.S_ISLNK(initial.st_mode):
+        raise FileRefusal(REFUSAL_SYMLINK, path)
+    if not stat.S_ISREG(initial.st_mode):
+        raise FileRefusal(REFUSAL_NOT_A_REGULAR_FILE, path)
+    non_blocking = getattr(os, "O_NONBLOCK", 0)
+    flags = os.O_RDONLY | non_blocking
+    flags |= getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise FileRefusal(REFUSAL_UNREADABLE, path) from exc
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise FileRefusal(REFUSAL_NOT_A_REGULAR_FILE, path)
+        if (opened.st_dev, opened.st_ino) != (initial.st_dev, initial.st_ino):
+            raise FileRefusal(
+                REFUSAL_UNREADABLE, path, f"file changed while it was inspected: {path}"
+            )
+        if opened.st_size > max_bytes:
+            raise FileRefusal(REFUSAL_TOO_LARGE, path)
+        if non_blocking:
+            os.set_blocking(descriptor, True)
+    except OSError as exc:
+        os.close(descriptor)
+        raise FileRefusal(REFUSAL_UNREADABLE, path) from exc
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
 def atomic_write_text(path: Path, value: str, max_bytes: int) -> None:
     """Atomically write bounded UTF-8 text without following a leaf symlink."""
 

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import cast
 from unittest import mock
 
-from agent_harness import journal, worktree
+from agent_harness import journal, paths, worktree
 from agent_harness.errors import HarnessError
 from agent_harness.paths import repository_key, user_data_path
 
@@ -60,6 +60,108 @@ class UserDataPathTests(unittest.TestCase):
 
             with self.assertRaisesRegex(HarnessError, "link-like"):
                 user_data_path("journal/2026-08.jsonl", home)
+
+
+class BoundedOpenTests(unittest.TestCase):
+    """The refusals must not depend on flags a platform may not have.
+
+    `O_NOFOLLOW` and `O_NONBLOCK` do not exist on Windows, and both are read
+    with `getattr(..., 0)` so their absence is silent. On a platform that has
+    them the flags refuse a symlink and keep a FIFO from blocking, which hides
+    whether the checks made before the open do any work — a mutation audit on
+    macOS reported both of those checks uncovered for exactly that reason.
+    What they are really for is the platform where the flags are zero, so they
+    are tested on the property that holds everywhere: the refusal happens
+    before anything is opened.
+    """
+
+    def setUp(self) -> None:
+        self._directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._directory.cleanup)
+        self.root = Path(self._directory.name)
+
+    @unittest.skipIf(os.name == "nt", "POSIX symlink")
+    def test_a_symlink_is_refused_before_it_is_opened(self) -> None:
+        target = self.root / "real"
+        target.write_text("{}", encoding="utf-8")
+        link = self.root / "link"
+        link.symlink_to(target)
+
+        with mock.patch.object(os, "open", side_effect=AssertionError("opened")):
+            with self.assertRaises(paths.FileRefusal) as caught:
+                paths.open_bounded_regular_file(link, 1024)
+
+        self.assertEqual(paths.REFUSAL_SYMLINK, caught.exception.reason)
+
+    @unittest.skipIf(os.name == "nt", "POSIX named pipe")
+    def test_a_named_pipe_is_refused_before_it_is_opened(self) -> None:
+        # Asserted on the open not happening rather than on the call
+        # returning, because without the check this would block for ever
+        # where `O_NONBLOCK` is zero — and a test that hangs reports nothing.
+        fifo = self.root / "pipe"
+        os.mkfifo(fifo)
+
+        with mock.patch.object(os, "open", side_effect=AssertionError("opened")):
+            with self.assertRaises(paths.FileRefusal) as caught:
+                paths.open_bounded_regular_file(fifo, 1024)
+
+        self.assertEqual(paths.REFUSAL_NOT_A_REGULAR_FILE, caught.exception.reason)
+
+    @unittest.skipIf(os.name == "nt", "POSIX named pipe")
+    def test_a_pipe_that_looked_regular_is_refused_after_the_open(self) -> None:
+        # The checks before the open read one `lstat`; the checks after it
+        # read the descriptor. Between the two the path can be replaced, so
+        # the second pair is what actually holds the contract — and because
+        # the first pair usually answers first, nothing exercised it. The
+        # race is made deterministic by handing the pre-open check the stat
+        # of a regular file while the path is a pipe.
+        fifo = self.root / "pipe"
+        os.mkfifo(fifo)
+        regular = self.root / "regular"
+        regular.write_bytes(b"{}")
+
+        with mock.patch.object(Path, "lstat", return_value=regular.lstat()):
+            with self.assertRaises(paths.FileRefusal) as caught:
+                paths.open_bounded_regular_file(fifo, 1024)
+
+        self.assertEqual(paths.REFUSAL_NOT_A_REGULAR_FILE, caught.exception.reason)
+
+    def test_a_file_swapped_for_another_between_the_checks_is_refused(self) -> None:
+        # The same window, with both ends a regular file, so only identity
+        # can tell them apart. Without this the reader would happily return
+        # a descriptor on a file nobody asked for.
+        asked = self.root / "asked"
+        asked.write_bytes(b"{}")
+        other = self.root / "other"
+        other.write_bytes(b"{}")
+
+        with mock.patch.object(Path, "lstat", return_value=other.lstat()):
+            with self.assertRaises(paths.FileRefusal) as caught:
+                paths.open_bounded_regular_file(asked, 1024)
+
+        self.assertEqual(paths.REFUSAL_UNREADABLE, caught.exception.reason)
+        self.assertIn("changed while it was inspected", str(caught.exception))
+
+    def test_a_missing_file_is_refused_as_unreadable(self) -> None:
+        with self.assertRaises(paths.FileRefusal) as caught:
+            paths.open_bounded_regular_file(self.root / "absent", 1024)
+
+        self.assertEqual(paths.REFUSAL_UNREADABLE, caught.exception.reason)
+
+    def test_a_file_over_the_bound_is_refused_and_the_descriptor_released(
+        self,
+    ) -> None:
+        path = self.root / "big"
+        path.write_bytes(b"x" * 64)
+
+        with self.assertRaises(paths.FileRefusal) as caught:
+            paths.open_bounded_regular_file(path, 16)
+
+        self.assertEqual(paths.REFUSAL_TOO_LARGE, caught.exception.reason)
+        # The refusal closes what it opened. Leaking one descriptor per
+        # refused file would exhaust a hook that reads a directory of them.
+        descriptor = paths.open_bounded_regular_file(path, 128)
+        os.close(descriptor)
 
 
 class RepositoryKeyTests(unittest.TestCase):
@@ -675,12 +777,18 @@ class RepositoryReadEquivalenceTests(unittest.TestCase):
 
     `previous_bypass` used to parse the whole retained journal and skip the
     records naming another repository on its first line. Reading only the
-    matching records instead is a claim about equivalence, and the claim was
-    wrong once: `repo` was a sheddable field, so a record could be written
-    that this reader drops and the old one kept — found by comparing the two
-    implementations over generated journals, not by reading either of them.
-    The comparison is kept rather than described, because the next change to
-    either side should have to face it.
+    matching records instead is a claim about equivalence, and this holds the
+    narrow half of it: the two readers return the same records, in the same
+    order, for the same journal.
+
+    It is deliberately not the test that found the defect in the wider claim,
+    and could not have been. That defect needed an end-to-end comparison of
+    `previous_bypass` itself, because the record at fault — one shed down past
+    its own `repo` — is invisible to *both* sides of the assertion below.
+    ``test_a_record_that_cannot_name_its_repository_is_not_written`` is what
+    holds that. This class is here so that an ordering change, a dropped
+    record or a change to how months are walked has something to fail
+    against.
     """
 
     EVENTS = (

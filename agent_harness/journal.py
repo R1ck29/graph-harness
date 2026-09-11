@@ -22,7 +22,12 @@ from typing import Any, Iterator, TextIO
 
 from .errors import HarnessError
 from .graph import utc_now
-from .paths import is_link_like, user_data_path
+from .paths import (
+    FileRefusal,
+    is_link_like,
+    open_bounded_regular_file,
+    user_data_path,
+)
 
 # Version 2 adds the ``edit`` event. Readers accept both: a version 1 record
 # carries no edit events, which reads correctly as a session observed through
@@ -42,6 +47,12 @@ MAX_JOURNAL_LINE_BYTES = 4096
 # grows without a task being spent, the same reason the review archive in
 # ``graph.py`` carries a bound.
 MAX_JOURNAL_MONTHS = 6
+
+# A bound on one month, so the reader refuses the same kind of file the graph
+# store does. Generous rather than tight: a month is a year's worth of the
+# busiest recorded sessions and still an order of magnitude under this, so the
+# bound only ever catches something that is not a month at all.
+MAX_MONTH_BYTES = 256 * 1024 * 1024
 
 EVENTS = (
     "session_open",
@@ -70,7 +81,18 @@ EVENTS = (
 # history — that scan matches on the fields that are never shed — so removing
 # it from the reader's view and leaving it in the writer's made the two
 # disagree. A record that cannot fit while naming its repository is not
-# written at all, which loses nothing that was ever readable.
+# written at all.
+#
+# That is not quite free, and the cost is named rather than waved at: one
+# reader did use such a record. `cli._journal_diagnostics` keys on `client`
+# and `ts` to report when each client was last observed, never on `repo`, so
+# a repo-shed record did reach it and no longer will. What is lost is a
+# per-client "last observed" timestamp in `doctor`, for a record whose
+# identity fields alone exceeded four kilobytes — against a record that no
+# conformance report, no bypass scan and no effectiveness figure could ever
+# read. The trade is deliberate. Records already on disk are unaffected
+# either way: the writer changed, not the reader, so an old repo-shed line
+# stays as invisible as it was.
 SHEDDABLE_FIELDS = ("snapshot", "reason", "source", "actor", "command")
 
 # The events only a client hook can produce. A `graph_transition` proves that
@@ -367,28 +389,11 @@ def open_month(path: Path) -> "TextIO | None":
     unreadable for the doctor command the recovery procedure depends on.
     """
 
-    non_blocking = getattr(os, "O_NONBLOCK", 0)
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | non_blocking
     try:
-        descriptor = os.open(path, flags)
-    except OSError:
+        descriptor = open_bounded_regular_file(path, MAX_MONTH_BYTES)
+    except (FileRefusal, OSError, ValueError):
         return None
     try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            os.close(descriptor)
-            return None
-        if non_blocking:
-            # Cleared only where it was set. Guarding on `hasattr(os,
-            # "set_blocking")` instead was wrong in a way that hid for
-            # months: Windows has no O_NONBLOCK, so there is nothing to
-            # clear, but it grew `os.set_blocking` in 3.12 — so on Windows
-            # 3.13 the attribute existed, the call failed on a regular file
-            # descriptor, the OSError handler below swallowed it, and every
-            # month read as unreadable. `journal.read` returned nothing and
-            # roughly seventy tests failed on that one leg while the same
-            # code passed on Windows 3.10, which has no `os.set_blocking`
-            # and so skipped the call entirely.
-            os.set_blocking(descriptor, True)
         return os.fdopen(descriptor, "r", encoding="utf-8", errors="replace")
     except OSError:
         try:
