@@ -473,8 +473,12 @@ class CodexSessionReaderTests(unittest.TestCase):
                     "client": "codex",
                     "session_id": "01a0",
                     "repo": "/repo",
-                    "started_at": 1788088667,
-                    "ended_at": 1788088674,
+                    # The hooks' own form, not the integer Codex stores.
+                    # A Codex verdict is read in the same list and under the
+                    # same keys as a hook-observed one, and every consumer
+                    # that had to guard for two forms got one of them wrong.
+                    "started_at": "2026-08-30T11:17:47+00:00",
+                    "ended_at": "2026-08-30T11:17:54+00:00",
                     "kind": "exec",
                 }
             ],
@@ -498,17 +502,64 @@ class CodexSessionReaderTests(unittest.TestCase):
 
         self.assertEqual(["subagent", "vscode", "unknown"], kinds)
 
-    def test_a_millisecond_timestamp_is_reduced_to_seconds(self) -> None:
+    def test_a_millisecond_column_names_the_same_instant_as_a_second_one(
+        self,
+    ) -> None:
+        # Codex carries both units, so the reader has to tell them apart
+        # before rendering. Asserted against the second-column store below
+        # rather than against a literal, so the two units are held to naming
+        # one instant rather than to two hand-written strings.
         self._store(
             "state_5.sqlite",
             "id TEXT, cwd TEXT, created_at INTEGER, updated_at INTEGER, source TEXT",
             [("a", "/r", 1788088667000, 1788088674000, "exec")],
         )
+        milliseconds = codex_sessions.sessions(self.home)[0]
+
+        self._store(
+            "state_6.sqlite",
+            "id TEXT, cwd TEXT, created_at INTEGER, updated_at INTEGER, source TEXT",
+            [("a", "/r", 1788088667, 1788088674, "exec")],
+        )
+        seconds = codex_sessions.sessions(self.home)[0]
+
+        self.assertEqual("2026-08-30T11:17:47+00:00", milliseconds["started_at"])
+        self.assertEqual("2026-08-30T11:17:54+00:00", milliseconds["ended_at"])
+        self.assertEqual(seconds["started_at"], milliseconds["started_at"])
+        self.assertEqual(seconds["ended_at"], milliseconds["ended_at"])
+
+    def test_a_codex_timestamp_sorts_against_a_hook_timestamp(self) -> None:
+        # The reason the form matters. Compared as text, the integer Codex
+        # stores sorts before every ISO timestamp whatever its date, so a
+        # session from today was listed before one from last year.
+        self._store(
+            "state_5.sqlite",
+            "id TEXT, cwd TEXT, created_at INTEGER, updated_at INTEGER, source TEXT",
+            [("a", "/r", 1788088667, 1788088674, "exec")],
+        )
+
+        recovered = codex_sessions.sessions(self.home)[0]["started_at"]
+
+        self.assertGreater(recovered, "2026-01-01T00:00:00+00:00")
+        self.assertLess(recovered, "2026-12-31T00:00:00+00:00")
+
+    def test_an_unrenderable_timestamp_leaves_the_session_without_bounds(
+        self,
+    ) -> None:
+        # The store is undocumented, so a column can hold a number no
+        # platform can render as a date. That the session ran, and where, is
+        # still worth reporting.
+        self._store(
+            "state_5.sqlite",
+            "id TEXT, cwd TEXT, created_at INTEGER, updated_at INTEGER, source TEXT",
+            [("a", "/r", 10**18, 10**18 + 7, "exec")],
+        )
 
         observed = codex_sessions.sessions(self.home)[0]
 
-        self.assertEqual(1788088667, observed["started_at"])
-        self.assertEqual(1788088674, observed["ended_at"])
+        self.assertIsNone(observed["started_at"])
+        self.assertIsNone(observed["ended_at"])
+        self.assertEqual("/r", observed["repo"])
 
     def test_a_store_missing_a_required_column_fails_by_name(self) -> None:
         self._store(

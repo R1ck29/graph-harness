@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import subprocess
 import sys
 import tempfile
@@ -143,6 +144,51 @@ class JournalWriterTests(unittest.TestCase):
         self.assertNotIn("snapshot", stored)
         self.assertEqual(["snapshot"], stored["shed"])
         self.assertEqual("s1", stored["session_id"])
+
+    def test_a_shed_record_still_names_its_repository(self) -> None:
+        # `repo` is an identity field, not a detail: every reader matches
+        # records to each other by it, and `conformance` will not consider
+        # one whose `repo` is not a string. It used to be the last entry in
+        # the shed list, so a record could be written that nothing could
+        # read — and the scan that places a session in its own history, which
+        # matches on the fields that are never shed, still found it, so the
+        # writer and the readers disagreed about which records exist.
+        entry = journal.record(
+            "session_open",
+            client="claude",
+            session_id="s1",
+            repo="/repo/a",
+            reason="r" * journal.MAX_JOURNAL_LINE_BYTES,
+            snapshot={"digest": "d" * (journal.MAX_JOURNAL_LINE_BYTES * 2)},
+        )
+
+        line = journal.render(entry)
+
+        self.assertIsNotNone(line)
+        assert line is not None
+        stored = json.loads(line)
+        self.assertEqual("/repo/a", stored["repo"])
+        self.assertEqual(["reason", "snapshot"], stored["shed"])
+
+    def test_a_record_that_cannot_name_its_repository_is_not_written(self) -> None:
+        # The other half of the same rule. Nothing can read a record that
+        # does not say where it came from, so not writing it loses nothing,
+        # and writing one made two parts of this module disagree about what
+        # the history contains.
+        #
+        # Sized so that shedding the repository is exactly what would bring
+        # this record under the bound and nothing else would: with `repo` in
+        # the shed list a line is written without it, and without it in the
+        # list there is no line at all. A record merely too large either way
+        # would pass this test whichever list was in force.
+        entry = journal.record(
+            "session_open",
+            client="claude",
+            session_id="s" * 1200,
+            repo="/checkout/" + "p" * 3000,
+        )
+
+        self.assertIsNone(journal.render(entry))
 
     def test_write_failure_returns_false_instead_of_raising(self) -> None:
         entry = journal.record("turn_end", client="claude", session_id="s1")
@@ -622,6 +668,85 @@ class JournalRepositoryReadTests(unittest.TestCase):
         found = list(journal.read_repo(windows, self.home))
 
         self.assertEqual(["win"], [entry["session_id"] for entry in found])
+
+
+class RepositoryReadEquivalenceTests(unittest.TestCase):
+    """The narrowed read must return what the whole read plus a filter did.
+
+    `previous_bypass` used to parse the whole retained journal and skip the
+    records naming another repository on its first line. Reading only the
+    matching records instead is a claim about equivalence, and the claim was
+    wrong once: `repo` was a sheddable field, so a record could be written
+    that this reader drops and the old one kept — found by comparing the two
+    implementations over generated journals, not by reading either of them.
+    The comparison is kept rather than described, because the next change to
+    either side should have to face it.
+    """
+
+    EVENTS = (
+        "session_open",
+        "turn_end",
+        "session_close",
+        "edit",
+        "graph_transition",
+        "bypass_reported",
+    )
+    REPOS = ("/repo/a", "/repo/b", "/repo/c")
+
+    def setUp(self) -> None:
+        self._directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._directory.cleanup)
+        self.home = Path(self._directory.name)
+
+    def _journal(self, seed: int) -> list[dict[str, object]]:
+        rng = random.Random(seed)
+        directory = journal.journal_directory(self.home)
+        directory.mkdir(parents=True, exist_ok=True)
+        records: list[dict[str, object]] = []
+        for tick in range(1, rng.randint(6, 40)):
+            event = rng.choice(self.EVENTS)
+            entry: dict[str, object] = {
+                "schema_version": journal.SCHEMA_VERSION,
+                "event": event,
+                "ts": f"2026-09-01T00:00:{tick:02d}+00:00",
+                "client": "claude",
+                "repo": rng.choice(self.REPOS),
+            }
+            # A graph_transition may name no session; everything else does.
+            if event != "graph_transition" or rng.random() < 0.5:
+                entry["session_id"] = f"s{rng.randint(1, 5)}"
+            if event == "edit":
+                entry["tool"] = "Edit"
+                entry["path_id"] = f"{rng.randint(0, 4):012x}"
+            if event in journal.BOUNDARY_EVENTS:
+                entry["snapshot"] = {
+                    "git": True,
+                    "head": "0" * 40,
+                    "digest": str(rng.randint(0, 3)) * 64,
+                    "files": rng.randint(0, 5),
+                    "lines": rng.randint(0, 50),
+                    "degraded": False,
+                }
+            records.append(entry)
+        (directory / "2026-09.jsonl").write_text(
+            "".join(cast(str, journal.render(entry)) for entry in records),
+            encoding="utf-8",
+        )
+        return records
+
+    def test_the_narrowed_read_returns_what_the_whole_read_would_have(self) -> None:
+        for seed in range(60):
+            with self.subTest(seed=seed):
+                self._journal(seed)
+                for repo in self.REPOS:
+                    whole = [
+                        entry
+                        for entry in journal.read(self.home)
+                        if entry.get("repo") == repo
+                    ]
+                    narrowed = list(journal.read_repo(repo, self.home))
+
+                    self.assertEqual(whole, narrowed)
 
 
 class JournalReadGuardTests(unittest.TestCase):

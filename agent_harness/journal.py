@@ -60,8 +60,18 @@ EVENTS = (
 
 # Dropped in this order to bring an over-long record under the line bound,
 # least useful first. Identity fields are never shed, so a shed record still
-# names the session it came from.
-SHEDDABLE_FIELDS = ("snapshot", "reason", "source", "actor", "command", "repo")
+# names the session and the repository it came from.
+#
+# `repo` was in this list, which contradicted the sentence above it. It is an
+# identity field: every reader matches records to each other by it, and
+# `conformance` will not even consider one whose `repo` is not a string, so a
+# record shed down past it was written and then ignored by everything. Worse,
+# it was still found by the scan that places the asking session in its own
+# history — that scan matches on the fields that are never shed — so removing
+# it from the reader's view and leaving it in the writer's made the two
+# disagree. A record that cannot fit while naming its repository is not
+# written at all, which loses nothing that was ever readable.
+SHEDDABLE_FIELDS = ("snapshot", "reason", "source", "actor", "command")
 
 # The events only a client hook can produce. A `graph_transition` proves that
 # `graphctl` ran, which a person can do by hand with no hook installed at all,

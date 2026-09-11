@@ -65,6 +65,21 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def utc_from_epoch(seconds: int) -> str:
+    """Return what :func:`utc_now` would have returned at *seconds*.
+
+    Beside `utc_now` deliberately. A timestamp recovered from another tool's
+    store is compared and sorted against timestamps stamped there, so the two
+    have to agree on offset spelling and precision exactly; written apart,
+    one of them would eventually gain a `Z` or a fractional second and the
+    comparison would go quietly wrong rather than fail.
+    """
+
+    return (
+        datetime.fromtimestamp(seconds, timezone.utc).replace(microsecond=0).isoformat()
+    )
+
+
 class Graph:
     """A validated in-memory task graph.
 

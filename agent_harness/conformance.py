@@ -210,9 +210,16 @@ def _contested(verdicts: list[dict[str, Any]]) -> None:
 def _overlaps(first: dict[str, Any], second: dict[str, Any]) -> bool:
     """Report whether two sessions were open at the same time.
 
-    Both ends of both sessions must be recorded in the same form. The Codex
-    store keeps whole seconds while the hooks keep an ISO timestamp, and
-    comparing one against the other would invent an overlap.
+    Both ends of both sessions have to be recorded at all. A session whose
+    opening or closing was never observed cannot be placed against another
+    one, and guessing would invent an overlap rather than find one.
+
+    The check is on presence, not on form. It used to be on form as well,
+    because the Codex store's whole seconds reached this key beside the
+    hooks' ISO timestamps and comparing the two would have compared a number
+    against a date; `codex_sessions` now renders its own into the same form,
+    so a Codex session that really did run alongside another is reported as
+    contested instead of being silently exempt.
     """
 
     bounds = [

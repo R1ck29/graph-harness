@@ -299,6 +299,15 @@ def previous_bypass(
     case it renders as a string that sorts above every real timestamp and
     takes over the selection.
 
+    *since* must be a record of a session in *repo* — in practice the record
+    this repository's own session-start hook just wrote. The scan that places
+    it reads only this repository's history, so a record from elsewhere is
+    simply not found and nothing is cut. Before the history was narrowed that
+    scan searched every repository's records and matched on identity fields
+    alone, so a foreign record with a colliding event, session id and
+    timestamp would gate this repository's history; nothing wanted that, and
+    nothing passes one.
+
     A ``graphctl`` run that names its session counts for it from that
     session's start onwards, wherever it was recorded; only an unnamed run is
     placed by position. Records from separate processes are not ordered by

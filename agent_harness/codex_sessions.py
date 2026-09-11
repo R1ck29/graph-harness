@@ -26,6 +26,7 @@ from typing import Any, Iterator
 from urllib.parse import quote
 
 from .errors import HarnessError
+from .graph import utc_from_epoch
 
 CODEX_HOME_VARIABLE = "CODEX_HOME"
 STATE_NAME = re.compile(r"state_([0-9]+)\.sqlite")
@@ -135,8 +136,8 @@ def _read_sessions(path: Path) -> Iterator[dict[str, Any]]:
                 "client": "codex",
                 "session_id": str(identifier),
                 "repo": str(cwd),
-                "started_at": _epoch(created_at),
-                "ended_at": _epoch(updated_at),
+                "started_at": _timestamp(created_at),
+                "ended_at": _timestamp(updated_at),
                 "kind": _kind(source),
             }
     except sqlite3.Error as exc:
@@ -147,8 +148,22 @@ def _read_sessions(path: Path) -> Iterator[dict[str, Any]]:
         connection.close()
 
 
-def _epoch(value: Any) -> int | None:
-    """Return a whole-second timestamp, tolerating the millisecond columns."""
+def _timestamp(value: Any) -> str | None:
+    """Return one of this harness's own timestamps, or None when there is none.
+
+    Rendered into the hooks' form rather than passed through as the integer
+    Codex stores. A Codex session's verdict is read beside a hook-observed
+    one, in the same list and under the same key, and two forms in one field
+    left every consumer to guard for both on its own: `_overlaps` refused to
+    compare a Codex session at all, so no Codex session could ever be
+    reported as contested however many ran together, and `report` ordered
+    them by comparing "1788088667" against "2026-09-11T..." as text, which
+    puts every Codex session before every other one whatever its date.
+
+    Nothing is lost in the conversion: Codex keeps whole seconds and
+    `utc_now` keeps whole seconds, so the two are the same instant to the
+    same precision.
+    """
 
     try:
         number = int(value)
@@ -156,7 +171,16 @@ def _epoch(value: Any) -> int | None:
         return None
     # Codex carries both second and millisecond columns; a value far past the
     # plausible second range is a millisecond one.
-    return number // 1000 if number > 100_000_000_000 else number
+    if number > 100_000_000_000:
+        number //= 1000
+    try:
+        return utc_from_epoch(number)
+    except (OSError, OverflowError, ValueError):
+        # An undocumented column can hold a number outside the range the
+        # platform can render as a date. The session is still reported — that
+        # it ran, and where, is the useful part — with no bounds, which is
+        # what every consumer already handles for a missing one.
+        return None
 
 
 def _kind(source: Any) -> str:
