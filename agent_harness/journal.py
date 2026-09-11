@@ -364,7 +364,7 @@ def skipped_months(
             continue
         try:
             plain = stat.S_ISREG(path.lstat().st_mode) and not is_link_like(path)
-        except OSError:
+        except (OSError, ValueError):
             # Reported apart from the wrong-type case. A directory whose mode
             # blocks `lstat` is not a month of the wrong kind, and saying so
             # sends a reader to replace a file that is already correct.

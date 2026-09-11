@@ -285,9 +285,13 @@ def _journal_diagnostics() -> dict[str, Any]:
     # journal's own question; doctor only reports the answer.
     for name, reason in journal.skipped_months():
         if not name:
+            # Capitalised like every other warning here. The reason is a
+            # fragment rather than a sentence, so it cannot be interpolated
+            # at the front without this.
             report["warnings"].append(
-                f"{reason}, so every report is empty rather than short. The "
-                "journal is not missing a month; it is unreachable."
+                f"{reason[:1].upper()}{reason[1:]}, so every report is empty "
+                "rather than short. The journal is not missing a month; it "
+                "is unreachable."
             )
             continue
         report["warnings"].append(
