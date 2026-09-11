@@ -246,9 +246,18 @@ def _mark_overlaps(group: list[dict[str, Any]]) -> None:
     Every pair used to be compared, which is fine until it is not: a single
     checkout accumulates sessions, and the non-overlapping case — sequential
     work, the normal one — paid the full square because nothing let the loop
-    stop early. Measured at 0.33s for 500 sessions and 5.36s for 2000, the
-    latter being almost all of a report's runtime, and 2000 is eleven
-    sessions a day across the six months the journal keeps.
+    stop early. Measured at 0.140s for 500 sessions and 2.259s for 2000
+    against 0.001s and 0.003s here, and confirmed independently at 36s
+    against 0.010s for 8000; the old cost rose fourfold per doubling and this
+    one rises twofold. Two thousand sessions is eleven a day across the six
+    months the journal keeps, so one checkout reaches it.
+
+    Equivalence with the pairwise version is exact, with one difference a
+    reviewer found and `report` cannot produce: the old loop skipped a
+    session against itself by object identity, so the same dict appearing
+    twice in one list went unflagged, while this excludes by index and flags
+    both. `_judge` builds a fresh dict per verdict, so no caller can hand
+    this the same object twice.
 
     So the search is narrowed and the question is left alone. Sorted by
     start, the sessions that can possibly overlap *i* are those starting no

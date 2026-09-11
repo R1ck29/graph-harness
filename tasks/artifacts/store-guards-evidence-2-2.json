@@ -1,0 +1,5 @@
+{
+  "criterion": "No report walks every pair of sessions, and none parses a journal record belonging to another repository",
+  "kind": "observation",
+  "summary": "Both halves are done in their own nodes and verified there. previous_bypass reads journal.read_repo(repo), measured 6.1x faster on 40,000 records across 50 checkouts and confirmed equivalent by an independent reviewer at 0 disagreements in 52,816 comparisons (node bypass-prefilter, PASS). _contested no longer compares every pair: 2.259s to 0.003s at 2000 sessions, held equal to the pairwise specification over 500 groups and every permutation of a five-session group (node contested-sweep, submitted). This criterion is on this node only because `graphctl init` copies the objective's criteria onto the first node; the work belongs to those two."
+}

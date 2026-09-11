@@ -28,6 +28,11 @@ from .storage import MAX_GRAPH_BYTES, FileLock, GraphStore
 
 MAX_EVIDENCE_FILE_BYTES = 1_048_576
 
+# A `pyvenv.cfg` is a handful of `key = value` lines. The bound is generous
+# rather than tight, because its job is to refuse something that is not that
+# file at all, not to police a real one.
+MAX_RUNTIME_CONFIG_BYTES = 64 * 1024
+
 
 # The commands that move graph state. A session that edits code and runs none
 # of these is the case the journal exists to make visible.
@@ -191,8 +196,18 @@ def _runtime_diagnostics() -> dict[str, Any]:
         # command that must not break when the installation is broken.
         return report
     report["runtime_path"] = str(config.parent)
+    # Through the bounded opener, like every other reader of a file this
+    # harness did not write. `read_text` was the last one left: a FIFO named
+    # `pyvenv.cfg` blocked this function for ever, and so blocked `doctor`,
+    # which is the one command the recovery procedure depends on. Verified by
+    # driving it on a thread that never returned.
     try:
-        lines = config.read_text(encoding="utf-8").splitlines()
+        descriptor = open_bounded_regular_file(config, MAX_RUNTIME_CONFIG_BYTES)
+    except (paths.FileRefusal, OSError, ValueError):
+        return report
+    try:
+        with os.fdopen(descriptor, "rb") as handle:
+            lines = handle.read().decode("utf-8").splitlines()
     except (OSError, ValueError):
         return report
     for line in lines:
@@ -263,6 +278,16 @@ def _journal_diagnostics() -> dict[str, Any]:
     except (HarnessError, OSError) as exc:
         report["warnings"].append(f"The journal directory is unusable: {exc}")
         return report
+    # The months that are not read, which is the silence this command exists
+    # to break: every reader skips them, so the history is short and the only
+    # place that could say so listed the readable ones and left a reader to
+    # assume that was all of them. Which files those are, and why, is the
+    # journal's own question; doctor only reports the answer.
+    for name, reason in journal.skipped_months():
+        report["warnings"].append(
+            f"The journal file {name} is named like a month and is not read "
+            f"({reason}), so every report is missing it."
+        )
     latest: dict[str, str] = {}
     edits: dict[str, str] = {}
     try:

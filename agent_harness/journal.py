@@ -299,6 +299,48 @@ def month_files(home: str | os.PathLike[str] | None = None) -> list[Path]:
     return [path for path in candidates if is_named_month(path)]
 
 
+def skipped_months(
+    home: str | os.PathLike[str] | None = None,
+) -> list[tuple[str, str]]:
+    """Name every file that looks like a month and is not read, and why.
+
+    Two silences are worth breaking, and neither is visible to any caller of
+    `read`. A file named like a month that is a link or a pipe never reaches
+    `month_files`, because naming a month and opening one are deliberately
+    separate and the naming check refuses it. A file that passes that check
+    and still cannot be opened — permissions, or larger than the reader's
+    bound — is dropped by `read` with a `continue`.
+
+    Either way the history is short by a month and nothing says so, which is
+    the one thing `doctor` exists to prevent: it listed the readable months
+    and left the reader to assume that was all of them.
+
+    This never raises, like everything else that reads this directory.
+    """
+
+    try:
+        directory = journal_directory(home)
+        candidates = sorted(directory.glob("*.jsonl"))
+    except (HarnessError, OSError, ValueError, RuntimeError):
+        return []
+    skipped: list[tuple[str, str]] = []
+    for path in candidates:
+        if not MONTH_NAME.fullmatch(path.name):
+            continue
+        if not is_named_month(path):
+            skipped.append((path.name, "not a plain file"))
+            continue
+        handle = open_month(path)
+        if handle is None:
+            skipped.append((path.name, "cannot be opened"))
+            continue
+        # Asked whether it opens, not what is in it. A descriptor held per
+        # month would be a leak in the command a broken install is
+        # diagnosed with.
+        handle.close()
+    return skipped
+
+
 def read(home: str | os.PathLike[str] | None = None) -> Iterator[dict[str, Any]]:
     """Yield every record that parses and names an event, oldest month first.
 

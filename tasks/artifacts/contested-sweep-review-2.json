@@ -1,0 +1,5 @@
+{
+  "criterion": "Its cost is no longer quadratic in the number of sessions in one repository, shown by a measurement",
+  "kind": "independent_test",
+  "summary": "Reviewer re-measured across five group shapes and sizes 250 to 8,000, reporting growth per doubling rather than ratios, with old and new answers asserted equal at every point. The old code grows 3.96-4.12x per doubling wherever its break cannot fire - cleanly quadratic - and the new one grows about 2x per doubling in every shape, extended to 128,000 sessions. At 8,000 sequential sessions that is 36.186s against 0.010s. The worst case for the new code was measured too: with all sessions mutually overlapping, where the old loop broke out on its second comparison, both are linear and the new one is a constant 2.0-2.3x slower in absolute terms - 0.096s against 0.042s at 64,000 sessions - so there is no asymptotic regression. 5 of 5 guards pinned, and the reviewer checked both new guards' old strings match the shipped lines verbatim so neither can silently no-op. Suites 418 OK on both interpreters; black, mypy, sync_adapters and graphctl validate all clean."
+}

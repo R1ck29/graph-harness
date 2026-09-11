@@ -395,6 +395,47 @@ GUARDS: tuple[Guard, ...] = (
         focus=("tests.test_conformance_contract",),
     ),
     Guard(
+        name="doctor: the runtime config goes through the bounded opener",
+        relative="agent_harness/cli.py",
+        old="        descriptor = open_bounded_regular_file(config, MAX_RUNTIME_CONFIG_BYTES)",
+        # Non-blocking, so the mutant fails instead of hanging the suite for
+        # the audit's full timeout — the mistake made once already on the
+        # graph store's own guard.
+        new='        descriptor = os.open(\n            config, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)\n        )',
+        # Pinned on the size bound, which is the only outcome that changes.
+        # A pipe does not work: a non-blocking plain open reads it as empty
+        # and reports what the refusal reports. Nor does a symlink:
+        # `user_data_path` refuses a link before this function opens
+        # anything. Both of those tests are kept for what they do hold, but
+        # neither could tell this line's presence from its absence.
+        pinned_by="test_a_runtime_config_over_the_bound_is_refused_rather_than_read",
+        focus=("tests.test_conformance_contract",),
+    ),
+    Guard(
+        name="doctor: a month refused before it opens is still named",
+        relative="agent_harness/journal.py",
+        old='            skipped.append((path.name, "not a plain file"))',
+        new="            pass",
+        pinned_by="test_a_month_refused_before_it_is_opened_is_reported",
+        focus=("tests.test_conformance_contract",),
+    ),
+    Guard(
+        name="doctor: a month that cannot be opened is named",
+        relative="agent_harness/journal.py",
+        old='            skipped.append((path.name, "cannot be opened"))',
+        new="            pass",
+        pinned_by="test_a_month_that_passes_its_name_and_cannot_be_opened_is_reported",
+        focus=("tests.test_conformance_contract",),
+    ),
+    Guard(
+        name="doctor: a readable month is not named as skipped",
+        relative="agent_harness/journal.py",
+        old="        handle = open_month(path)\n        if handle is None:",
+        new="        handle = open_month(path)\n        if True:",
+        pinned_by="test_a_readable_month_is_not_reported_as_unreadable",
+        focus=("tests.test_conformance_contract",),
+    ),
+    Guard(
         name="lock: retry on Windows access-denied",
         relative="agent_harness/storage.py",
         old="            except (FileExistsError, PermissionError) as exc:",

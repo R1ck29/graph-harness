@@ -1,0 +1,5 @@
+{
+  "criterion": "No report walks every pair of sessions, and none parses a journal record belonging to another repository",
+  "kind": "independent_test",
+  "summary": "Pointer accepted after checking the graph's own state and the code, not the claim: bypass-prefilter and contested-sweep both verified, session_hooks.previous_bypass reads journal.read_repo(repo), and _contested groups by repo and calls the bisect sweep rather than a pairwise loop. Reviewer specifically ruled the criteria-copying acceptable rather than evasion, noting the executor disclosed it, named the owning nodes, and that every pointer checked out - including one that was weaker than a PASS at write time and described as 'submitted', which is exactly what the graph said."
+}

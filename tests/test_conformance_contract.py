@@ -241,6 +241,168 @@ class DoctorDiagnosticsTests(unittest.TestCase):
         config.parent.mkdir(parents=True, exist_ok=True)
         config.write_text(f"home = /somewhere\nversion = {version}\n", encoding="utf-8")
 
+    @unittest.skipIf(os.name == "nt", "POSIX named pipe")
+    def test_a_runtime_config_that_is_a_pipe_does_not_block_doctor(self) -> None:
+        # The last reader in this harness that opened a file it did not write
+        # without the bounded opener. A FIFO named `pyvenv.cfg` blocked this
+        # for ever — and doctor is the one command the recovery procedure
+        # depends on, so it is the worst place for that to be true.
+        #
+        # Driven in the subprocess doctor actually runs in, with a timeout,
+        # so a regression fails rather than hangs the suite.
+        config = (
+            Path(self.home)
+            / ".local/share/graph-engineering-agent-harness/venv/pyvenv.cfg"
+        )
+        config.parent.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(config)
+        self._run(
+            "init", "--objective", "diagnose", "--criterion", "the report is honest"
+        )
+
+        environment = dict(os.environ)
+        environment["GRAPH_HARNESS_HOME"] = self.home
+        done = subprocess.run(
+            [sys.executable, str(GRAPHCTL), "--graph", str(self.graph), "doctor"],
+            cwd=REPOSITORY,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=environment,
+            timeout=60,
+        )
+
+        self.assertEqual(0, done.returncode, done.stderr)
+        report = json.loads(done.stdout)
+        self.assertIsNone(report["runtime_version"])
+        self.assertIsNone(report["runtime_supported"])
+        self.assertTrue(report["healthy"], "a bad runtime file is not a bad graph")
+
+    def test_a_runtime_config_over_the_bound_is_refused_rather_than_read(
+        self,
+    ) -> None:
+        # The same guard as the pipe above, pinned on an outcome a mutation
+        # can change. Two candidates were not. "Does not block" is not an
+        # outcome: an opener without the type check reads the pipe as empty
+        # and reports exactly what the refusal reports. Nor is a symlink:
+        # `user_data_path` walks the components and refuses a link before
+        # this function opens anything, so that never reaches the opener
+        # either. The size bound does distinguish them — refused here, read
+        # by a plain open, which would report the version inside a file of
+        # any length.
+        config = (
+            Path(self.home)
+            / ".local/share/graph-engineering-agent-harness/venv/pyvenv.cfg"
+        )
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(
+            "version = 3.99.0\n" + "padding = x\n" * 20_000, encoding="utf-8"
+        )
+        self.assertGreater(
+            config.stat().st_size, cli.MAX_RUNTIME_CONFIG_BYTES, "not over the bound"
+        )
+
+        report = self._diagnose()
+
+        self.assertIsNone(report["runtime_version"], "an unbounded file was read")
+        self.assertIsNone(report["runtime_supported"])
+
+    @unittest.skipIf(os.name == "nt", "POSIX symlink")
+    def test_a_runtime_config_reached_through_a_symlink_is_not_read(self) -> None:
+        # Held by the path walk in `user_data_path` rather than by the
+        # opener, which is why it pins no guard here. Kept because the
+        # property matters on its own: the runtime version must come from
+        # the install tree and not from wherever a link points.
+        real = Path(self.home) / "elsewhere.cfg"
+        real.write_text("home = /somewhere\nversion = 3.99.0\n", encoding="utf-8")
+        config = (
+            Path(self.home)
+            / ".local/share/graph-engineering-agent-harness/venv/pyvenv.cfg"
+        )
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.symlink_to(real)
+
+        report = self._diagnose()
+
+        self.assertIsNone(report["runtime_version"], "a link was followed")
+        self.assertIsNone(report["runtime_supported"])
+
+    def _months(self) -> Path:
+        months = (
+            Path(self.home) / ".local/share/graph-engineering-agent-harness/journal"
+        )
+        months.mkdir(parents=True, exist_ok=True)
+        return months
+
+    def _month(self, path: Path) -> None:
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "event": "session_open",
+                    "ts": "2026-08-01T00:00:00+00:00",
+                    "client": "claude",
+                    "session_id": "s1",
+                    "repo": "/repo",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    @unittest.skipIf(os.name == "nt", "POSIX named pipe")
+    def test_a_month_refused_before_it_is_opened_is_reported(self) -> None:
+        # Two silences, and this is the one no caller of `read` can see: a
+        # file named like a month that is a pipe never reaches `month_files`
+        # at all, because naming a month and opening one are deliberately
+        # separate checks. doctor listed the readable months and left a
+        # reader to assume that was all of them.
+        months = self._months()
+        self._month(months / "2026-07.jsonl")
+        os.mkfifo(months / "2026-06.jsonl")
+
+        report = self._diagnose()
+        warnings = " ".join(report["warnings"])
+
+        self.assertIn("2026-07.jsonl", report["journal_months"])
+        self.assertNotIn("2026-06.jsonl", report["journal_months"])
+        self.assertIn("2026-06.jsonl is named like a month and is not read", warnings)
+        self.assertIn("not a plain file", warnings)
+        self.assertNotIn("2026-07.jsonl is named", warnings)
+
+    @unittest.skipIf(os.name == "nt", "POSIX file permissions")
+    def test_a_month_that_passes_its_name_and_cannot_be_opened_is_reported(
+        self,
+    ) -> None:
+        # The other silence: a plain file, correctly named, that `read` drops
+        # with a `continue`. It does reach `month_files`, so doctor listed it
+        # among the months it had read.
+        months = self._months()
+        unreadable = months / "2026-06.jsonl"
+        self._month(unreadable)
+        unreadable.chmod(0o000)
+        self.addCleanup(unreadable.chmod, 0o600)
+
+        report = self._diagnose()
+        warnings = " ".join(report["warnings"])
+
+        self.assertIn("2026-06.jsonl", report["journal_months"])
+        self.assertIn("2026-06.jsonl is named like a month and is not read", warnings)
+        self.assertIn("cannot be opened", warnings)
+
+    def test_a_readable_month_is_not_reported_as_unreadable(self) -> None:
+        # The other half: the warning must not fire for every month, which a
+        # check written the wrong way round would do while looking right.
+        months = self._months()
+        self._month(months / "2026-06.jsonl")
+        self._month(months / "2026-07.jsonl")
+
+        report = self._diagnose()
+
+        for name in ("2026-06.jsonl", "2026-07.jsonl"):
+            self.assertIn(name, report["journal_months"])
+        self.assertEqual([], [w for w in report["warnings"] if "is not read" in w])
+
     def _diagnose(self) -> dict[str, Any]:
         self._run(
             "init", "--objective", "diagnose", "--criterion", "the report is honest"
