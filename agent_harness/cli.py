@@ -11,7 +11,11 @@ import tempfile
 from pathlib import Path
 from typing import Any, Sequence
 
-from . import conformance, journal, paths
+from . import journal, paths
+
+# Imported rather than mirrored: doctor names the floor the hook actually
+# enforces, and a second copy of it could drift into naming a different one.
+from .claude_hook import MINIMUM_PYTHON
 from .errors import HarnessError
 from .graph import Graph
 from .paths import repository_key, user_data_path, workspace_path
@@ -19,9 +23,6 @@ from .storage import MAX_GRAPH_BYTES, FileLock, GraphStore
 
 MAX_EVIDENCE_FILE_BYTES = 1_048_576
 
-# Mirrors the floor the installed hook enforces before it imports anything,
-# so doctor names the same boundary the hook fails on.
-MINIMUM_PYTHON = (3, 10)
 
 # The commands that move graph state. A session that edits code and runs none
 # of these is the case the journal exists to make visible.
@@ -38,10 +39,6 @@ MUTATING_COMMANDS = frozenset(
         "supersede",
     }
 )
-
-# The events only a client hook can produce. Hook liveness is judged from
-# these alone.
-SESSION_EVENTS = frozenset({"session_open", "turn_end", "session_close"})
 
 
 def _read_evidence_file(path: Path) -> str:
@@ -206,26 +203,12 @@ def _runtime_diagnostics() -> dict[str, Any]:
     return report
 
 
-def _blocking_ancestor() -> Path | None:
-    """Return the first path on the way to the journal that is not a directory.
+def _remember(latest: dict[str, str], entry: dict[str, Any]) -> None:
+    """Keep the newest timestamp each client is named by, ignoring anything else."""
 
-    Answered without resolving anything, because resolving is what raises on
-    POSIX and what silently succeeds on Windows.
-    """
-
-    try:
-        root = (
-            paths.selected_home() / paths.INSTALL_DIRECTORY / journal.JOURNAL_DIRECTORY
-        )
-    except (HarnessError, OSError):
-        return None
-    for parent in (root, *root.parents):
-        try:
-            if parent.exists() and not parent.is_dir():
-                return parent
-        except OSError:
-            return None
-    return None
+    client, stamp = entry.get("client"), entry.get("ts")
+    if isinstance(client, str) and isinstance(stamp, str):
+        latest[client] = max(stamp, latest.get(client, ""))
 
 
 def _journal_diagnostics() -> dict[str, Any]:
@@ -258,7 +241,7 @@ def _journal_diagnostics() -> dict[str, Any]:
     # which is the one thing doctor exists to prevent. Reporting the errno
     # was also the weaker message: it named the leaf the caller asked for
     # rather than the ancestor that is actually wrong.
-    blocking = _blocking_ancestor()
+    blocking = paths.blocking_ancestor(journal.JOURNAL_DIRECTORY)
     if blocking is not None:
         report["warnings"].append(
             f"The journal directory is unusable: {blocking} is not a directory"
@@ -279,30 +262,19 @@ def _journal_diagnostics() -> dict[str, Any]:
         report["warnings"].append(f"The journal could not be read: {exc}")
         return report
     for entry in entries:
-        # The edit hook is the only producer that proves PostToolUse fires.
-        # A client can record boundaries perfectly and still have no edit
-        # hook installed, in which case nothing can attribute any change to
-        # it and every one of its sessions reads as `unattributed`. A reader
-        # has to be able to tell that apart from a client that genuinely
-        # only read code.
+        # Two vocabularies, because they answer two questions. An edit record
+        # is the only producer that proves `PostToolUse` fires: a client can
+        # record boundaries perfectly and still have no edit hook installed,
+        # in which case nothing can attribute any change to it and every one
+        # of its sessions reads as `unattributed`, which a reader has to be
+        # able to tell apart from a client that genuinely only read code. A
+        # boundary record is the only thing that proves a session hook ran —
+        # a `graph_transition` proves that `graphctl` ran, which a person can
+        # do by hand with no hook installed at all.
         if entry.get("event") == "edit":
-            client = entry.get("client")
-            stamp = entry.get("ts")
-            if isinstance(client, str) and isinstance(stamp, str):
-                if stamp > edits.get(client, ""):
-                    edits[client] = stamp
-            continue
-        # Only a session boundary proves a hook ran. A graph_transition proves
-        # that graphctl ran, which a person can do by hand with no hook
-        # installed at all, so counting it would report a client as observed
-        # on exactly the evidence that says nothing about its hooks.
-        if entry.get("event") not in SESSION_EVENTS:
-            continue
-        client = entry.get("client")
-        stamp = entry.get("ts")
-        if isinstance(client, str) and isinstance(stamp, str):
-            if stamp > latest.get(client, ""):
-                latest[client] = stamp
+            _remember(edits, entry)
+        elif entry.get("event") in journal.BOUNDARY_EVENTS:
+            _remember(latest, entry)
     report["last_observed"] = latest
     report["edit_hook_last_seen"] = edits
     for client in sorted(latest):
@@ -418,29 +390,29 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument("path", nargs="?")
     ready = commands.add_parser("ready", help="list tasks ready to start")
     ready.add_argument("path", nargs="?")
-    conformance = commands.add_parser(
+    conform = commands.add_parser(
         "conformance", help="report whether sessions followed the protocol"
     )
-    conformance.add_argument("--repo", help="limit the report to one repository")
-    conformance.add_argument(
+    conform.add_argument("--repo", help="limit the report to one repository")
+    conform.add_argument(
         "--min-files",
         type=int,
         default=0,
         dest="min_files",
         help="omit sessions that changed fewer files than this",
     )
-    conformance.add_argument(
+    conform.add_argument(
         "--no-codex",
         action="store_true",
         dest="no_codex",
         help="omit sessions recovered from the Codex session store",
     )
-    conformance.add_argument(
+    conform.add_argument(
         "--prune",
         action="store_true",
         help="delete journal months beyond the retention bound",
     )
-    conformance.add_argument(
+    conform.add_argument(
         "--keep-months",
         type=int,
         default=journal.MAX_JOURNAL_MONTHS,
@@ -630,11 +602,11 @@ def run(args: argparse.Namespace) -> Any:
             report["graph_valid"] = True
             report["node_count"] = len(graph.nodes)
         journal_report = _journal_diagnostics()
-        warnings = journal_report.pop("warnings")
+        report["warnings"].extend(journal_report.pop("warnings"))
         report.update(journal_report)
         report.update(_runtime_diagnostics())
         if report["runtime_supported"] is False:
-            warnings.append(
+            report["warnings"].append(
                 f"The installed runtime reports Python {report['runtime_version']}, "
                 f"below the supported {MINIMUM_PYTHON[0]}.{MINIMUM_PYTHON[1]}. Hooks "
                 "using it fail closed on every session; reinstall against a "
@@ -642,13 +614,12 @@ def run(args: argparse.Namespace) -> Any:
             )
         for client in ("claude", "codex"):
             if client not in report["last_observed"]:
-                warnings.append(
+                report["warnings"].append(
                     f"No {client} session has been observed. Its hooks may not be "
                     "installed, or the client may not run them. Run "
                     "'python scripts/install_pc.py --check' to compare the "
                     "installed configuration with what this harness expects."
                 )
-        report["warnings"].extend(warnings)
         # Journal and runtime findings are advisory. They describe how much of
         # the harness is observable, not whether this graph can be worked on,
         # so they must not change the health of the graph itself.
@@ -660,6 +631,11 @@ def run(args: argparse.Namespace) -> Any:
     if args.command == "ready":
         return {"ready": store.load().ready_node_ids()}
     if args.command == "conformance":
+        # Imported here, as `effectiveness` already is: it reaches
+        # `codex_sessions` and so `sqlite3`, which is about a third of this
+        # module's import cost and is paid by every other subcommand too.
+        from . import conformance
+
         if args.prune:
             return {"pruned": journal.prune(args.keep_months)}
         return conformance.report(
@@ -787,7 +763,7 @@ def _observe(args: argparse.Namespace, result: Any) -> None:
     Journaling happens here, at the single point where a command has already
     succeeded, rather than inside each handler. A command that raised never
     reaches this line, so "a failed command records nothing" holds by
-    construction instead of by seven separate call sites agreeing.
+    construction instead of by every mutating call site agreeing.
     """
 
     if args.command not in MUTATING_COMMANDS or not isinstance(result, dict):

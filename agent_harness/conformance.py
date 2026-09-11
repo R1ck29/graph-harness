@@ -4,12 +4,14 @@ The session hooks answer one question at one moment: did the session that
 just finished skip the graph? This answers the same question about every
 session on record, which is what makes a rate rather than an anecdote.
 
-The two share their rules deliberately, by calling the same functions rather
-than by keeping two copies in step: a session is judged on its edit records, a
-run of ``graphctl`` inside its window counts for it however it was launched,
-and sizes are counted from those same records. Where the hooks stay silent,
-this reports what it saw and how much it trusts it, because a report a person
-reads can carry doubt that a one-line warning cannot.
+What a session is judged *on* is shared by calling the same functions rather
+than by keeping two copies in step: its edit records decide whether anything
+is attributable to it, and its sizes are counted from those same records. How
+a session is *placed in time* is not shared — ``session_hooks.previous_bypass``
+walks the journal again for its own purposes, and the two windowing
+implementations agree only by inspection. Where the hooks stay silent, this
+reports what it saw and how much it trusts it, because a report a person reads
+can carry doubt that a one-line warning cannot.
 """
 
 from __future__ import annotations
@@ -69,12 +71,7 @@ def _windows(records: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
                 transitions.append((position, repo))
             continue
         session = entry.get("session_id")
-        if not isinstance(session, str) or event not in {
-            "session_open",
-            "turn_end",
-            "session_close",
-            "edit",
-        }:
+        if not isinstance(session, str) or event not in journal.OWNED_EVENTS:
             continue
         state = sessions.setdefault(
             session,
@@ -84,8 +81,12 @@ def _windows(records: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
                 "repo": repo,
                 "opened": None,
                 "ended": None,
-                "started_at": None,
-                "ended_at": None,
+                # Journal positions, not timestamps: `_judge` reports the
+                # timestamps from the records themselves under the same two
+                # names, and one key meaning two things in one module is how
+                # a reader ends up comparing a position against a clock.
+                "open_position": None,
+                "end_position": None,
                 "closed": False,
                 "records": [],
             },
@@ -96,13 +97,13 @@ def _windows(records: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         if event == "session_open":
             if state["opened"] is None:
                 state["opened"] = entry
-                state["started_at"] = position
+                state["open_position"] = position
         else:
             state["ended"] = entry
-            state["ended_at"] = position
+            state["end_position"] = position
             state["closed"] = state["closed"] or event == "session_close"
     for session, state in sessions.items():
-        started = state["started_at"]
+        started, ended = state["open_position"], state["end_position"]
         state["transitions"] = sum(
             1
             for position in attributed.get(session, ())
@@ -113,9 +114,9 @@ def _windows(records: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
             1
             for position, repo in transitions
             if repo == state["repo"]
-            and state["started_at"] is not None
-            and state["ended_at"] is not None
-            and state["started_at"] < position < state["ended_at"]
+            and started is not None
+            and ended is not None
+            and started < position < ended
         )
     return sessions
 
@@ -150,13 +151,13 @@ def _judge(state: dict[str, Any]) -> dict[str, Any]:
     # Reported beside the project's own, never folded into it: a session that
     # wrote only to a scratchpad has not touched this repository, and saying
     # so is more useful than either counting it or hiding it.
-    verdict["outside_edits"] = len(
-        session_hooks.edits(state["records"], include_outside=True)
-    ) - len(session_hooks.edits(state["records"]))
+    verdict["outside_edits"] = (
+        len(session_hooks.edits(state["records"], include_outside=True)) - calls
+    )
     verdict["confidence"] = HIGH if state["closed"] else MEDIUM
     # The tree is reported as context and decides nothing. Both counts below
     # come from the snapshots, and no branch here reads them.
-    before, after = (opened or {}).get("snapshot"), (ended or {}).get("snapshot")
+    before, after = opened.get("snapshot"), ended.get("snapshot")
     verdict["tree_changed"] = worktree.dirty_changed(before, after)
     verdict["tree_files"], verdict["tree_lines"] = _tree_context(before, after)
     if not session_hooks.edited(state["records"]):

@@ -47,6 +47,12 @@ from pathlib import Path
 
 LIVE = Path(__file__).resolve().parents[1]
 
+# What a copy of the checkout must not carry. `tests/__init__.py` names the
+# same list for the same reason; this script cannot import it, because
+# importing `tests` sweeps a workspace and rebinds the harness home, which a
+# script whose whole contract is to leave the live tree alone must not do.
+COPY_EXCLUSIONS = (".git", ".venv", "__pycache__", ".mypy_cache", ".test-workspaces")
+
 # Written where a mutation would otherwise need a helper exception type.
 NEVER = "class _NeverRaised(Exception):\n    pass\n\n\n"
 
@@ -62,7 +68,9 @@ class Guard:
     pinned_by: str
     # Set where a mutation needs a helper class defined at module scope.
     needs_never: bool = False
-    # Modules to run for the fast subset; empty means the whole suite.
+    # Modules to run for the fast subset. Not optional in practice: a guard
+    # that names a test must name the module it lives in, because the credit
+    # is checked against both, and `objected` refuses one that does not.
     focus: tuple[str, ...] = field(default_factory=tuple)
 
 
@@ -158,6 +166,14 @@ GUARDS: tuple[Guard, ...] = (
         focus=("tests.test_suite_hygiene_contract",),
     ),
     Guard(
+        name="test workspace sweep: not in a pool worker",
+        relative="tests/__init__.py",
+        old="    if multiprocessing.parent_process() is not None:\n        return",
+        new="    if False:\n        return",
+        pinned_by="test_a_pool_worker_does_not_sweep_the_workspaces_its_parent_is_using",
+        focus=("tests.test_suite_hygiene_contract",),
+    ),
+    Guard(
         name="test workspace sweep: clear on import",
         relative="tests/__init__.py",
         old="_clear_workspace_root()\natexit.register(_clear_workspace_root)",
@@ -182,24 +198,24 @@ GUARDS: tuple[Guard, ...] = (
             "        (entry for entries in shape.values() for entry in entries),\n"
             "        key=repr,\n"
             "    )\n"
-            '    return {"all": flattened}',
-        )[0],
+            '    return {"all": flattened}'
+        ),
         pinned_by="test_check_reports_drift_for_a_managed_entry_moved_to_another_event",
         focus=("tests.test_pc_install_contract",),
     ),
     Guard(
         name="install drift: carry the matcher",
         relative="scripts/install_pc.py",
-        old='                        carried["matcher"] = matcher.get("matcher")\n                        ours.append(carried)',
-        new="                        ours.append(carried)",
+        old='                carried["matcher"] = matcher.get("matcher")\n                yield event, carried',
+        new="                yield event, carried",
         pinned_by="test_check_reports_drift_for_a_changed_managed_matcher",
         focus=("tests.test_pc_install_contract",),
     ),
     Guard(
         name="install drift: keep duplicates distinguishable",
         relative="scripts/install_pc.py",
-        old="                        ours.append(carried)",
-        new="                        ours[:] = [carried]",
+        old="        shape[event].append(carried)",
+        new="        shape[event][:] = [carried]",
         pinned_by="test_check_reports_drift_for_a_duplicated_managed_entry",
         focus=("tests.test_pc_install_contract",),
     ),
@@ -244,20 +260,10 @@ def copy_repository() -> Path:
     root = Path(tempfile.mkdtemp(prefix="mutation-audit.")) / "repo"
     # Checked before anything is written, not after.
     assert_outside_live(root.parent)
-    subprocess.run(
-        (
-            "rsync",
-            "-a",
-            "--exclude=.git",
-            "--exclude=.venv",
-            "--exclude=__pycache__",
-            "--exclude=.mypy_cache",
-            "--exclude=.test-workspaces",
-            f"{LIVE}/",
-            f"{root}/",
-        ),
-        check=True,
-    )
+    # `shutil` rather than `rsync`: the same copy with the same exclusions is
+    # already made this way in `tests/__init__.py` and by the installer, and
+    # `rsync` is not present on Windows, which this project otherwise tests.
+    shutil.copytree(LIVE, root, ignore=shutil.ignore_patterns(*COPY_EXCLUSIONS))
     assert_outside_live(root)
     return root
 
@@ -265,8 +271,6 @@ def copy_repository() -> Path:
 def run_suite(root: Path, modules: tuple[str, ...]) -> set[tuple[str, str]]:
     """Return the names of tests that failed or errored in *root*."""
 
-    for cache in root.rglob("__pycache__"):
-        shutil.rmtree(cache, ignore_errors=True)
     command = [sys.executable, "-m", "unittest"]
     command.extend(modules or ("discover",))
     done = subprocess.run(
@@ -461,8 +465,10 @@ def audit(selected: tuple[Guard, ...], fast: bool) -> int:
             print(f"      named:  {guard.pinned_by}")
             print(f"      caught: {render(caught)}")
         else:
-            named = guard.pinned_by if objected(caught, guard) else render(caught)
-            print(f"  {guard.name:52} pinned by {named}")
+            # `objected` is already known true here: the branch above took
+            # every case where it is not, so re-asking it could only produce
+            # the arm that cannot be reached.
+            print(f"  {guard.name:52} pinned by {guard.pinned_by}")
         shutil.rmtree(root.parent, ignore_errors=True)
     shutil.rmtree(baseline_root.parent, ignore_errors=True)
 

@@ -10,6 +10,7 @@ set the variable themselves when they need to read back what they wrote.
 from __future__ import annotations
 
 import atexit
+import multiprocessing
 import os
 import shutil
 import tempfile
@@ -50,6 +51,23 @@ def _clear_workspace_root() -> None:
     quietly — ``ignore_errors=True`` is what made the original silent.
     """
 
+    # Not in a multiprocessing child. Under the spawn start method — the
+    # default on macOS and Windows — every pool worker re-imports this
+    # package and so runs this sweep, and eight of them raced each other
+    # inside one `shutil.rmtree`: the loser raised `FileNotFoundError` out of
+    # its own import, which the pool reported only as a worker that died for
+    # no stated reason, and the interrupted walk left directory entries that
+    # `os.scandir` then answered with `Stale NFS file handle`. Measured at 11
+    # failures in 12 attempts with the root populated, which is why
+    # `test_concurrent_appends_lose_no_line_and_interleave_none` failed
+    # intermittently and only on the spawn platforms.
+    #
+    # The sweep cannot be made forgiving — `ignore_errors=True` is what
+    # destroyed this repository once — so the answer is not to run it where
+    # it has nothing to clean. A child inherits a run its parent already
+    # swept for, and its own workspaces are the parent's to remove.
+    if multiprocessing.parent_process() is not None:
+        return
     root = WORKSPACE_ROOT
     repository = REPOSITORY.resolve()
     if root.is_symlink():
@@ -64,6 +82,21 @@ def _clear_workspace_root() -> None:
     if resolved.name != ".test-workspaces":
         raise RuntimeError(f"unexpected workspace root name: {resolved.name}")
     shutil.rmtree(resolved)
+
+
+# What a copy of the checkout must not carry: `.git` would make the copy a
+# repository of its own, `.venv` is large and machine-specific, and
+# `.test-workspaces` is the sweep target the tests that copy the tree are
+# testing. Named once, because a test that drives a destructive guard against
+# a copy must not be able to get this list wrong.
+COPY_EXCLUSIONS = (".git", ".venv", "__pycache__", ".mypy_cache", ".test-workspaces")
+
+
+def copy_repository(into: Path) -> Path:
+    """Copy the checkout to *into* and return it."""
+
+    shutil.copytree(REPOSITORY, into, ignore=shutil.ignore_patterns(*COPY_EXCLUSIONS))
+    return into
 
 
 def workspace_root() -> Path:

@@ -18,17 +18,18 @@ importing the module deleted the repository — source, history and virtualenv
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import tempfile
 import sys
 import unittest
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 from tests import (
     REPOSITORY,
     WORKSPACE_ROOT,
     _clear_workspace_root,
+    copy_repository,
     workspace_root,
 )
 
@@ -39,6 +40,18 @@ PROGRAM = (
     "import tests;"
     "{body}"
 )
+
+
+def _import_package(index: int) -> str:
+    """Import the test package in a pool worker and report that it survived.
+
+    Defined at module scope because a spawned worker has to import this
+    module to unpickle it, and that import is the one under test.
+    """
+
+    import tests  # noqa: F401
+
+    return "ok"
 
 
 def _run(body: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -111,14 +124,7 @@ class SuiteHygieneTests(unittest.TestCase):
         # which is Python 3.11 and this project supports 3.10.
         holder = tempfile.TemporaryDirectory()
         self.addCleanup(holder.cleanup)
-        root = Path(holder.name) / "repo"
-        shutil.copytree(
-            REPOSITORY,
-            root,
-            ignore=shutil.ignore_patterns(
-                ".git", ".venv", "__pycache__", ".mypy_cache", ".test-workspaces"
-            ),
-        )
+        root = copy_repository(Path(holder.name) / "repo")
         self.assertNotEqual(REPOSITORY, root)
         init = root / "tests/__init__.py"
         source = init.read_text(encoding="utf-8")
@@ -137,6 +143,39 @@ class SuiteHygieneTests(unittest.TestCase):
         self.assertNotEqual(0, done.returncode, "the sweep did not refuse")
         self.assertIn("refusing to remove the repository itself", done.stderr)
         self.assertTrue(survivor.is_file(), "the repository copy was deleted")
+
+    def test_a_pool_worker_does_not_sweep_the_workspaces_its_parent_is_using(
+        self,
+    ) -> None:
+        # Under the spawn start method every pool worker re-imports the test
+        # package, so every worker ran the import-time sweep and eight of
+        # them raced inside one `shutil.rmtree`. The loser raised out of its
+        # own import and the pool reported only `BrokenProcessPool`, which
+        # is how `test_concurrent_appends_lose_no_line_and_interleave_none`
+        # failed intermittently on macOS while Linux — where the default is
+        # fork, and a forked child re-imports nothing — never saw it.
+        #
+        # The root is populated first: the race needs a tree large enough
+        # that two workers are inside the walk at the same moment. Measured
+        # at 11 failures in 12 attempts before the fix and none after, so
+        # two attempts is enough to catch a regression without paying for
+        # twelve. Both run whatever the platform, because a worker must not
+        # sweep its parent's directory on any of them.
+        root = workspace_root()
+        for name in range(40):
+            (root / f"pool-{name}").mkdir(exist_ok=True)
+            (root / f"pool-{name}" / "held").write_text("x", encoding="utf-8")
+        for attempt in range(2):
+            with ProcessPoolExecutor(max_workers=8) as pool:
+                self.assertEqual(
+                    ["ok"] * 8,
+                    list(pool.map(_import_package, range(8))),
+                    f"a pool worker failed to import on attempt {attempt}",
+                )
+        self.assertTrue(
+            (root / "pool-0" / "held").is_file(),
+            "a worker swept the directory its parent was using",
+        )
 
     # Skipped on Windows because the sweep it exercises reads
     # `Path.is_symlink`, whose meaning for a junction differs there and
@@ -160,14 +199,7 @@ class SuiteHygieneTests(unittest.TestCase):
         # destructive guard must not itself be able to break the tree.
         holder = tempfile.TemporaryDirectory()
         self.addCleanup(holder.cleanup)
-        root = Path(holder.name) / "repo"
-        shutil.copytree(
-            REPOSITORY,
-            root,
-            ignore=shutil.ignore_patterns(
-                ".git", ".venv", "__pycache__", ".mypy_cache", ".test-workspaces"
-            ),
-        )
+        root = copy_repository(Path(holder.name) / "repo")
         outside = Path(holder.name) / "outside"
         outside.mkdir()
         keep = outside / "keep.txt"

@@ -6,11 +6,18 @@ The deterministic core has no platform imports, API calls, or network need.
 ## Operating systems
 
 The package and installed `graphctl` entry point are tested in GitHub Actions on
-Ubuntu, macOS, and Windows with Python 3.10 and 3.13. The public quick start has
-separate Bash and PowerShell setup commands. Filesystem confinement rejects
-symbolic links on every platform and link-like Windows reparse points,
-including NTFS directory junctions, while allowing non-redirecting cloud
-placeholder tags.
+Ubuntu, macOS, and Windows with Python 3.10, 3.12, and 3.13: the supported
+floor, the newest release, and one version between them. The middle leg is not
+decoration — `os.set_blocking` appears on Windows in 3.12 and `unittest`
+changed the failure id it prints in 3.11, so both interpreter behaviours this
+harness depends on change inside the range rather than at its ends, and a green
+3.10 beside a green 3.13 says nothing about the versions between. Any 3.10 or
+newer interpreter is supported, as `pyproject.toml` states with
+`requires-python = ">=3.10"`; those three are what every commit verifies. The
+public quick start has separate Bash and PowerShell setup commands. Filesystem
+confinement rejects symbolic links on every platform and link-like Windows
+reparse points, including NTFS directory junctions, while allowing
+non-redirecting cloud placeholder tags.
 
 GitHub-hosted runners are the tested CI environment. The pinned v7 releases of
 `actions/checkout` and `actions/setup-python` use the Node 24 action runtime. An

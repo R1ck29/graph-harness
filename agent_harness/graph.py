@@ -12,6 +12,14 @@ from typing import Any, Iterable, Mapping, cast
 
 from .errors import HarnessError
 
+# The statuses that let dependent work proceed. A superseded dependency is
+# settled, not owed: its approach was abandoned rather than left undone, so a
+# node waiting on it would wait for ever. Named once because the same test is
+# made in five places and the sixth, in `_next_action`, still reads
+# `!= "verified"` and so tells a node to wait for a dependency nothing will
+# ever move.
+SETTLED = frozenset({"verified", "superseded"})
+
 STATUSES = {
     "blocked",
     "ready",
@@ -386,11 +394,10 @@ class Graph:
     def _validate_runtime_consistency(self) -> None:
         by_id = {node["id"]: node for node in self.nodes}
         for node in self.nodes:
-            # A superseded dependency is settled, not owed. It is the one
-            # status other than verified that lets dependent work proceed,
-            # because its approach was abandoned rather than left undone.
+            # Read from the local map rather than through `self.node`, which
+            # is a linear scan: this runs for every node on every validate.
             deps_verified = all(
-                by_id[dependency]["status"] in {"verified", "superseded"}
+                by_id[dependency]["status"] in SETTLED
                 for dependency in node["depends_on"]
             )
             if node["status"] == "ready" and not deps_verified:
@@ -826,11 +833,7 @@ class Graph:
         node.pop("started_at", None)
         node.pop("submitted_at", None)
         node.pop("verified_at", None)
-        deps_verified = all(
-            self.node(dependency)["status"] in {"verified", "superseded"}
-            for dependency in node["depends_on"]
-        )
-        node["status"] = "ready" if deps_verified else "blocked"
+        node["status"] = "ready" if self._dependencies_settled(node) else "blocked"
         self.validate()
         return cast(str, node["status"])
 
@@ -905,10 +908,7 @@ class Graph:
             descendant
             for descendant in self.descendants(node_id)
             if self.node(descendant)["status"] in {"ready", "blocked", "invalidated"}
-            and all(
-                self.node(dependency)["status"] in {"verified", "superseded"}
-                for dependency in self.node(descendant)["depends_on"]
-            )
+            and self._dependencies_settled(self.node(descendant))
         ]
         self.validate()
         return released
@@ -960,11 +960,17 @@ class Graph:
                 upstream.append({"node": ancestor_id, "files": files})
         return upstream
 
+    def _dependencies_settled(self, node: dict[str, Any]) -> bool:
+        """Report whether every dependency of *node* is finished with."""
+
+        return all(
+            self.node(dependency)["status"] in SETTLED
+            for dependency in node["depends_on"]
+        )
+
     def completion_check(self) -> None:
         incomplete = [
-            node["id"]
-            for node in self.nodes
-            if node["status"] not in {"verified", "superseded"}
+            node["id"] for node in self.nodes if node["status"] not in SETTLED
         ]
         if incomplete:
             raise HarnessError(f"graph is not complete; unverified nodes: {incomplete}")
@@ -1095,10 +1101,7 @@ class Graph:
             node = self.node(node_id)
             if node["status"] != "blocked":
                 continue
-            if all(
-                self.node(dependency)["status"] in {"verified", "superseded"}
-                for dependency in node["depends_on"]
-            ):
+            if self._dependencies_settled(node):
                 node["status"] = "ready"
 
     @staticmethod

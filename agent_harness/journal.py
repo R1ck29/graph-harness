@@ -63,6 +63,16 @@ EVENTS = (
 # names the session it came from.
 SHEDDABLE_FIELDS = ("snapshot", "reason", "source", "actor", "command", "repo")
 
+# The events only a client hook can produce. A `graph_transition` proves that
+# `graphctl` ran, which a person can do by hand with no hook installed at all,
+# so a reader asking whether hooks fire must select on these alone.
+BOUNDARY_EVENTS = frozenset({"session_open", "turn_end", "session_close"})
+
+# Those plus the edit records, which is everything a session owns rather than
+# everything it caused. Spelled here because three readers select on the same
+# set and a fourth copy of it is a fourth chance to leave one event out.
+OWNED_EVENTS = BOUNDARY_EVENTS | frozenset({"edit"})
+
 
 def journal_directory(home: str | os.PathLike[str] | None = None) -> Path:
     """Return the directory that holds monthly journal files."""

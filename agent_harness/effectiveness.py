@@ -165,7 +165,8 @@ def report_from_documents(documents: Iterable[dict[str, Any]]) -> dict[str, Any]
     first_pass = [node for node in verified if _count(node) == 1]
     histogram: dict[int, int] = {}
     for node in nodes:
-        histogram[_count(node)] = histogram.get(_count(node), 0) + 1
+        attempts = _count(node)
+        histogram[attempts] = histogram.get(attempts, 0) + 1
 
     passed = failed = caught = 0
     caught_nodes: set[tuple[str, str]] = set()
@@ -364,14 +365,24 @@ def _load(path: str | os.PathLike[str]) -> tuple[dict[str, Any] | None, str]:
     return loaded, ""
 
 
-def _count(node: dict[str, Any]) -> int:
-    value = node.get("attempts")
+def _whole_number(value: Any) -> int:
+    """Return a recorded integer, treating anything else as absent.
+
+    Every field read here comes out of a file a person can edit, so a string,
+    a float or a boolean where a count belongs must not reach arithmetic. The
+    bool arm is not redundant: `True` is an `int` in Python and would count as
+    one attempt.
+    """
+
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _count(node: dict[str, Any]) -> int:
+    return _whole_number(node.get("attempts"))
 
 
 def _limit(node: dict[str, Any]) -> int:
-    value = node.get("max_attempts")
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+    return _whole_number(node.get("max_attempts"))
 
 
 def _rate(part: int, whole: int) -> float | None:

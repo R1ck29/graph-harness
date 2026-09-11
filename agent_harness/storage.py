@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import random
 import stat
 import tempfile
 import time
@@ -39,6 +38,13 @@ class FileLock:
                 os.write(self._fd, f"{os.getpid()}\n".encode("ascii"))
                 return self
             except (FileExistsError, PermissionError) as exc:
+                # Imported here rather than at module scope, because this
+                # module is pulled in by the package `__init__`: the edit
+                # hook, which runs after every editing tool call and never
+                # takes a lock, paid about four milliseconds for `random`
+                # hundreds of times a session. This retry is its only caller.
+                import random
+
                 if time.monotonic() >= deadline:
                     raise HarnessError(
                         f"timed out waiting for lock: {self.path}"

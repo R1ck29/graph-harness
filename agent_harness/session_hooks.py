@@ -19,7 +19,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from . import journal, worktree
 from .errors import HarnessError
@@ -349,7 +349,7 @@ def previous_bypass(
         # session is still running, so its own records say nothing yet.
         if position >= cut:
             continue
-        if event not in {"session_open", "turn_end", "session_close", "edit"}:
+        if event not in journal.OWNED_EVENTS:
             continue
         owned.setdefault(session, []).append(entry)
         if event == "session_open":
@@ -501,28 +501,33 @@ def session_end() -> int:
     return 0
 
 
-def start_entrypoint() -> int:
-    """Console entry point for the session-start hook."""
+def _entrypoint(handler: Callable[[], int]) -> int:
+    """Check the interpreter, then run one hook.
+
+    Written once so the floor cannot be enforced on two of the three hooks
+    and forgotten on the third. The import stays inside the function, as it
+    was in each of the three copies this replaces.
+    """
 
     from .claude_hook import ensure_supported_python
 
     ensure_supported_python(sys.version_info[:3])
-    return session_start()
+    return handler()
+
+
+def start_entrypoint() -> int:
+    """Console entry point for the session-start hook."""
+
+    return _entrypoint(session_start)
 
 
 def end_entrypoint() -> int:
     """Console entry point for the session-end hook."""
 
-    from .claude_hook import ensure_supported_python
-
-    ensure_supported_python(sys.version_info[:3])
-    return session_end()
+    return _entrypoint(session_end)
 
 
 def edit_entrypoint() -> int:
     """Console entry point for the post-edit hook."""
 
-    from .claude_hook import ensure_supported_python
-
-    ensure_supported_python(sys.version_info[:3])
-    return record_edit()
+    return _entrypoint(record_edit)

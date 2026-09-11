@@ -39,14 +39,18 @@ def _observe_turn(payload: dict[str, object], root: Path) -> None:
 
     try:
         from . import journal, session_hooks, worktree
-        from .paths import repository_key
+        from .paths import repository_key_fast
 
         journal.append(
             journal.record(
                 "turn_end",
                 client=session_hooks.client_name(),
                 session_id=payload.get("session_id"),
-                repo=repository_key(root),
+                # The derivation that does not spawn git, for the same
+                # reason the edit hook uses it: this runs once per turn, and
+                # it falls back to the git call when there is no `.git` to
+                # find, so it cannot drift from the other producers.
+                repo=repository_key_fast(root),
                 snapshot=worktree.snapshot(root),
             )
         )

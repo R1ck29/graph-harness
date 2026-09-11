@@ -97,6 +97,16 @@ def repository_key(value: str | os.PathLike[str] | None = None) -> str:
             ("git", "-C", str(start), "rev-parse", "--show-toplevel"),
             capture_output=True,
             text=True,
+            # Named, not inherited, for the same reason `worktree._git`
+            # names it: `text=True` alone decodes with the locale's
+            # preferred encoding, and git emits paths as UTF-8 bytes on
+            # every platform. Under a cp1252 or cp932 locale a non-ASCII
+            # repository path came back mojibake here while
+            # `repository_key_fast` — which reads the path from the
+            # filesystem — returned it correctly, so the two producers
+            # this pair exists to keep in agreement disagreed.
+            encoding="utf-8",
+            errors="replace",
             timeout=GIT_KEY_TIMEOUT_SECONDS,
             check=False,
         )
@@ -185,6 +195,34 @@ def user_data_path(
                 f"link-like (symlink or junction) paths are not allowed: {current}"
             )
     return candidate
+
+
+def blocking_ancestor(relative: str | os.PathLike[str]) -> Path | None:
+    """Return the first path on the way to installed state that is not a directory.
+
+    Answered without resolving anything, because resolving is what raises on
+    POSIX and what silently succeeds on Windows: a regular file where a
+    directory belongs raises ``NotADirectoryError`` out of the path walk on
+    one platform and nothing at all on the other, so the same broken install
+    read as a warning here and as perfect health there.
+
+    The layout is composed here rather than by the caller. Every reader of
+    installed state degrades differently on a broken one — an append reports
+    False, an enumeration reports no months — and none of them can name the
+    component that is actually wrong, which is the only thing worth saying.
+    """
+
+    try:
+        root = selected_home() / INSTALL_DIRECTORY / Path(relative)
+    except (HarnessError, OSError):
+        return None
+    for parent in (root, *root.parents):
+        try:
+            if parent.exists() and not parent.is_dir():
+                return parent
+        except OSError:
+            return None
+    return None
 
 
 def atomic_write_text(path: Path, value: str, max_bytes: int) -> None:
