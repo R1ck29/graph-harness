@@ -11,7 +11,7 @@ blocked -> ready -> running -> awaiting_verification -> verified
 affected descendant -> invalidated -> ready or blocked (retry)
 ```
 
-- Dependencies must be `verified` before a node becomes `ready`.
+- Dependencies must be `verified` or `superseded` before a node becomes `ready`.
 - `start` is the only transition to `running` and increments `attempts`.
 - `submit` is the only transition to `awaiting_verification`.
 - `verify` is the only transition to `verified` or `failed`.

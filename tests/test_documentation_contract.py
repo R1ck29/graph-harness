@@ -156,6 +156,8 @@ class DocumentationContractTests(unittest.TestCase):
 
         self.assertNotIn("The example hook has no network", security)
         self.assertNotIn("It returns immediately when that repository has no", security)
+        readme = (REPOSITORY / "README.md").read_text(encoding="utf-8")
+        self.assertNotIn("The hook exits immediately when no", readme)
         self.assertIn("The installed session hooks do write", security)
         self.assertIn("when there is no graph it records the", security)
 

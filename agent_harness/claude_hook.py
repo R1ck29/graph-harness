@@ -72,7 +72,7 @@ def main() -> int:
             print("Graph guard input exceeds 1 MiB", file=sys.stderr)
             return 2
         payload = json.loads(raw or "{}")
-    except json.JSONDecodeError:
+    except (OSError, ValueError):  # undecodable or malformed input
         payload = {}
     if not isinstance(payload, dict):
         print("Graph guard input must be a JSON object", file=sys.stderr)

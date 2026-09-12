@@ -89,6 +89,15 @@ class SessionHookTests(unittest.TestCase):
 
         self.assertEqual(["turn_end"], self._events())
 
+    def test_the_stop_hook_survives_input_its_locale_cannot_decode(self) -> None:
+        # A UTF-8 path read through a non-UTF-8 stdin (cp932, C locale).
+        stdin = io.TextIOWrapper(
+            io.BytesIO('{"session_id": "s1", "cwd": "/tmp/プロジェクト"}'.encode()),
+            encoding="ascii",
+        )
+        with mock.patch("sys.stdin", stdin):
+            self.assertEqual(0, claude_hook.main())
+
     def test_the_stop_hook_still_refuses_an_incomplete_graph(self) -> None:
         (self.repo / "task-graph.json").write_text(
             json.dumps(

@@ -34,6 +34,12 @@ class PublicSchemaContractTests(unittest.TestCase):
             REVIEW_RESULT_SCHEMA.read_text(encoding="utf-8")
         )
 
+    def test_task_graph_schema_names_every_status_the_harness_writes(self) -> None:
+        from agent_harness.graph import STATUSES
+
+        node = self.task_graph["$defs"]["node"]
+        self.assertEqual(STATUSES, set(node["properties"]["status"]["enum"]))
+
     def test_task_graph_schema_preserves_withdrawal_review_history(self) -> None:
         node = self.task_graph["$defs"]["node"]
         review_history = node["properties"]["review_history"]
