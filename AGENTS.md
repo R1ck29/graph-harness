@@ -19,5 +19,7 @@ replace `graphctl` with `python scripts/graphctl.py`.
 - Keep credentials, customer data, and unredacted client material out of graph
   evidence; use repository-relative artifact references or redacted summaries.
 - Use `roles/` and the relevant on-demand skill for detailed procedures.
+- Before every coding task, explicitly load the `ponytail` skill at `full`;
+  higher-priority requirements and required tests or reviews take precedence.
 - Run `python -m unittest discover -v` and `graphctl completion-check` before
   declaring the objective complete.
