@@ -1,0 +1,5 @@
+{
+  "criterion": "A test fails if the check reverts to comparing against verified only",
+  "kind": "test",
+  "summary": "scripts/mutation_audit.py declares guard 'next action: a settled dependency is not pending', which reverts graph.py:1012 to '!= \"verified\"' in a copy of the tree and runs tests.test_graph_contract there. Audit output: '1 of 1 guards pinned by their named test; 0 declared uncovered', so the named test is what objects when the check reverts."
+}

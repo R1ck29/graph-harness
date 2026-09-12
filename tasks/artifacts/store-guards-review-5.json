@@ -1,0 +1,5 @@
+{
+  "criterion": "Every behaviour changed here is pinned by a named test and, where it is a guard, by a mutation-audit entry",
+  "kind": "independent_test",
+  "summary": "Met on substance, with one number in the executor's evidence false. Reviewer ran the focused audit (7 of 7 pinned, verbatim) and the full audit (37 of 37 pinned), and did not take the audit's credit on trust: it applied two mutations by hand in git-archive copies and confirmed the store guard's revert fails two named tests fast rather than hanging, and that replacing both pre-open checks with `if False:` fails the two before-the-open tests with 'AssertionError: opened' from the patched os.open - so that pinning is real where O_NOFOLLOW and O_NONBLOCK are zero. Suites 418 OK on both interpreters; black, mypy over the CI command, and sync_adapters all clean. THE CORRECTION: the evidence said 41 guards. The tree has 37, confirmed by the audit, by len(GUARDS), and by an AST count across the branch (28 / 31 / 34 / 37 at the four commits); 41 never existed. The same inflation is in the commit messages. Cause recorded: the number was written from arithmetic rather than measured."
+}

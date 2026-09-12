@@ -1,0 +1,5 @@
+{
+  "criterion": "A settled dependency is never named as one to wait for",
+  "kind": "observation",
+  "summary": "Done and verified in node next-action-settled (PASS). graph._next_action reads `not in SETTLED`, and the reviewer audited every remaining '\"verified\"' comparison in the module to confirm none of the others is a dependency check. Same reason as above for this criterion appearing on this node."
+}

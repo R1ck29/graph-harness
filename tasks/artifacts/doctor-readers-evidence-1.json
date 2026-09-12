@@ -1,0 +1,5 @@
+{
+  "criterion": "The runtime probe reads pyvenv.cfg through the same bounded opener, so a FIFO there is refused rather than blocking doctor",
+  "kind": "test",
+  "summary": "The defect was reproduced before it was fixed: with a FIFO named pyvenv.cfg, _runtime_diagnostics driven on a thread was still alive after 6 seconds with no result; after routing it through paths.open_bounded_regular_file it returns in 0.0004s with runtime_version None. This was the last reader in the harness still opening a file it did not write with read_text, which makes the previous commit's subject - 'every reader of an untrusted file' - broader than what had shipped. Pinned by test_a_runtime_config_that_is_a_pipe_does_not_block_doctor, which drives the subprocess doctor actually runs in under a 60-second timeout so a regression fails rather than hangs the suite, and asserts healthy stays true because a bad runtime file is not a bad graph. Beside it, test_a_runtime_config_reached_through_a_symlink_is_not_read records that the link case is held by user_data_path's component walk rather than by the opener."
+}

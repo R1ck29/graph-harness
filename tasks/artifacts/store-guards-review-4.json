@@ -1,0 +1,5 @@
+{
+  "criterion": "A settled dependency is never named as one to wait for",
+  "kind": "independent_test",
+  "summary": "Pointer verified: next-action-settled verified, and graph._next_action reads 'not in SETTLED' with SETTLED defined as the two finished statuses."
+}

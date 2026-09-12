@@ -6,11 +6,18 @@ The deterministic core has no platform imports, API calls, or network need.
 ## Operating systems
 
 The package and installed `graphctl` entry point are tested in GitHub Actions on
-Ubuntu, macOS, and Windows with Python 3.10 and 3.13. The public quick start has
-separate Bash and PowerShell setup commands. Filesystem confinement rejects
-symbolic links on every platform and link-like Windows reparse points,
-including NTFS directory junctions, while allowing non-redirecting cloud
-placeholder tags.
+Ubuntu, macOS, and Windows with Python 3.10, 3.12, and 3.13: the supported
+floor, the newest release, and one version between them. The middle leg is not
+decoration — `os.set_blocking` appears on Windows in 3.12 and `unittest`
+changed the failure id it prints in 3.11, so both interpreter behaviours this
+harness depends on change inside the range rather than at its ends, and a green
+3.10 beside a green 3.13 says nothing about the versions between. Any 3.10 or
+newer interpreter is supported, as `pyproject.toml` states with
+`requires-python = ">=3.10"`; those three are what every commit verifies. The
+public quick start has separate Bash and PowerShell setup commands. Filesystem
+confinement rejects symbolic links on every platform and link-like Windows
+reparse points, including NTFS directory junctions, while allowing
+non-redirecting cloud placeholder tags.
 
 GitHub-hosted runners are the tested CI environment. The pinned v7 releases of
 `actions/checkout` and `actions/setup-python` use the Node 24 action runtime. An
@@ -50,6 +57,27 @@ Local versions: login-shell `codex-cli 0.146.1`; desktop-bundled
   main session, and reached `{"complete": true}`. A separate read-only probe
   confirmed the desktop-bundled 0.150 build can also delegate to the regular
   global reviewer profile.
+
+- Hooks are documented for Codex with the same event set and the same standard
+  input payload as Claude Code, and `~/.codex/hooks.json` is parsed: an entry
+  with an out-of-range timeout draws a clamping warning. **They did not
+  execute.** Four probes on 2026-08-30 and 2026-08-31, against login-shell
+  `codex-cli` 0.146.1 and the desktop-bundled 0.151.0-alpha.7.1, defined a hook
+  on every documented event whose command appended a line to a file, and no
+  command ever ran, under both `read-only` and writable sandboxes.
+
+  Reproduction: write a `hooks.json` under a temporary `CODEX_HOME` giving each
+  event a command such as `printf "%s\n" "&lt;event&gt;" >> /tmp/probe.log`, run
+  `codex exec --skip-git-repo-check "Say OK"` with `CODEX_HOME` pointing at it,
+  and read the file. The configuration is parsed and the run completes; the
+  file stays empty.
+
+  The harness installs the entries regardless, since they cost nothing while
+  this holds and become live if it changes. Because a Codex session's working
+  tree is therefore never observed, `graphctl conformance` recovers Codex
+  sessions from `~/.codex/state_*.sqlite` — metadata only, no message content —
+  and reports them as `bypass_suspected`. `graphctl doctor` reports Codex as
+  never observed until a client actually runs the hooks.
 
 Sources: [AGENTS.md](https://developers.openai.com/codex/guides/agents-md),
 [skills](https://developers.openai.com/codex/skills),
@@ -92,6 +120,36 @@ Local version: `2.1.239 (Claude Code)`.
   session, and reached `{"complete": true}`. The installed Stop hook then
   exited 0; the pre-existing `SessionStart` and `PostToolUse` hooks remained
   present and unchanged in count.
+
+### `PostToolUse`, measured 2026-08-31
+
+The edit signal rests on this hook, so it was measured rather than assumed.
+
+| Fact | How it was established |
+| --- | --- |
+| `PostToolUse` with a `matcher` runs in practice on this machine | `~/.claude/settings.json` already carried a working third-party entry on matcher `Edit\|Write` before this harness wrote one |
+| A hook process costs 23.6 ms bare and 40.4 ms importing `agent_harness.journal` | Ten runs of each, timed with `time` |
+| The edit hook costs 33-36 ms per invocation and spawns no process | Ten end-to-end runs of `graphctl-edit`; an independent reviewer counted spawns at the OS layer by wrapping `os.posix_spawn`, `os.fork` and `subprocess.Popen` and observed zero |
+| Deriving the repository key with `git rev-parse` cost 18.7 ms per edit | Measured before and after the change to a `.git` walk-up; the recorded `path_id` is identical either way on a real tree |
+
+Reproduction: run `graphctl-edit` with a `PostToolUse` payload on standard
+input and read `<install root>/journal/YYYY-MM.jsonl`.
+
+### Git differs between installed versions, and it mattered
+
+`REBASE_HEAD` is **not** removed when a rebase completes on `git 2.50.1`
+(`/usr/bin/git`, Apple Git-155): it survives later commits, a checkout, a merge
+and a `gc`, and is cleared only by the next rebase. On `git 2.21.0`
+(`/usr/local/bin/git`) it is removed. A design that treated the file as an
+open-operation marker therefore silenced every session in any repository where
+a rebase conflict had ever been resolved — and the test suite could not see it,
+because the older git is first on `PATH` here.
+
+Reproduction: in a scratch repository, create a conflicting rebase, resolve it,
+run `rebase --continue`, then check `git status --porcelain` (empty),
+`.git/rebase-merge` (absent) and `.git/REBASE_HEAD` (present under 2.50.1,
+absent under 2.21.0). `tests/test_session_hook_contract.py` now runs a full
+conflicted-rebase cycle under a second git when the machine has one.
 
 Sources: [memory and CLAUDE.md](https://code.claude.com/docs/en/memory),
 [extensions](https://code.claude.com/docs/en/features-overview),

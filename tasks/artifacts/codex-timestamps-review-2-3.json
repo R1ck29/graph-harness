@@ -1,0 +1,5 @@
+{
+  "criterion": "The tests that pinned the epoch integer are updated to pin the new form deliberately, not deleted",
+  "kind": "independent_test",
+  "summary": "Reviewer identified the two tests from the pre-node commit and confirmed both survive pinning ISO strings, the second renamed and strengthened to cross-check the unit columns. Three exception arms verified byte-identically on both interpreters (10**15 ValueError, 10**18 OSError, 10**21 OverflowError after the division), and the INTEGER claim confirmed: the largest post-division value an int64 column can yield is about 9.22e15, which still lands in the ValueError arm, so an integer column genuinely cannot reach the other two. The inf claim verified end to end: with OverflowError removed from the first try, report() returned sessions: [] and bypass_suspected: 0 - all three rows lost - against all three reported now. The removed test confirmed subsumed, with one residual loss named (the ended_at-is-None assertion for the unrenderable case), judged net stronger. 6 of 6 guards pinned, output quoted verbatim. Suites 414 OK on 3.12.12 and 414 OK on 3.10.19; black and mypy clean."
+}

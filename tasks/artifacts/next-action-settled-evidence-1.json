@@ -1,0 +1,5 @@
+{
+  "criterion": "A node blocked on a superseded dependency and an unsettled one is told to wait for the unsettled one alone",
+  "kind": "test",
+  "summary": "tests/test_graph_contract.py::GraphSchemaAndSchedulingTests::test_a_blocked_node_waits_only_for_dependencies_that_can_still_move builds abandoned(superseded) and pending(ready) as dependencies of later(blocked) and asserts next_action equals exactly 'wait for dependencies: pending'. Written before the fix and observed failing with 'wait for dependencies: abandoned, pending'. agent_harness/graph.py:1012 now reads 'not in SETTLED' instead of '!= \"verified\"', which is the sixth and last dependency check in that module to use the shared constant. Full suite: 392 tests OK on 3.12.12; black and mypy clean."
+}

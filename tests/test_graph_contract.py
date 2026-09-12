@@ -6,6 +6,7 @@ from typing import Any
 
 from agent_harness.errors import HarnessError
 from agent_harness.graph import (
+    MAX_ATTEMPTS,
     MAX_EVIDENCE,
     MAX_REVIEW_HISTORY_BYTES,
     MAX_TEXT,
@@ -158,6 +159,29 @@ class GraphSchemaAndSchedulingTests(unittest.TestCase):
         self.assertIn(
             "withdraw plan", task_graph.status_summary()["nodes"][0]["next_action"]
         )
+
+    def test_a_blocked_node_waits_only_for_dependencies_that_can_still_move(
+        self,
+    ) -> None:
+        # A superseded dependency is settled: its approach was abandoned, so
+        # nothing will ever move it, and naming it tells the reader to wait
+        # for something that cannot happen. Every other dependency check in
+        # this module reads both settled statuses; this one was the last
+        # place left reading `!= "verified"`.
+        task_graph = Graph.from_dict(
+            graph(
+                node("abandoned", status="superseded"),
+                node("pending", status="ready"),
+                node("later", depends_on=["abandoned", "pending"]),
+            )
+        )
+
+        actions = {
+            item["id"]: item["next_action"]
+            for item in task_graph.status_summary()["nodes"]
+        }
+
+        self.assertEqual("wait for dependencies: pending", actions["later"])
 
 
 class GraphVerificationTests(unittest.TestCase):
@@ -1080,3 +1104,149 @@ class UpstreamSurfaceTests(unittest.TestCase):
         packet = task_graph.review_packet("implement")
 
         self.assertEqual([], packet["upstream_verified_files"])
+
+
+class EscapeHatchTests(unittest.TestCase):
+    """Recording a person's decision, rather than making an agent forge one.
+
+    Both transitions here exist because this repository hit their absence.
+    A node reached `max_attempts`, the protocol said to escalate, the human
+    answered "take one more", and there was no way to say so that was not
+    editing the graph by hand. Later a design was abandoned and a failed node
+    blocked its descendants forever, so changing approach meant rebuilding the
+    graph, which silently resets every attempt budget in it.
+    """
+
+    def _fail_once(self, task_graph: Graph, node_id: str) -> None:
+        task_graph.start(node_id, executor_id=f"{node_id}-executor")
+        task_graph.submit(
+            node_id,
+            [{"kind": "test", "summary": "attempted"}],
+            actor_id=f"{node_id}-executor",
+        )
+        task_graph.verify(
+            node_id,
+            "fail",
+            f"{node_id}-reviewer",
+            reason="not good enough",
+            failed_criteria=["relevant tests pass"],
+            review_evidence=[{"kind": "test", "summary": "reviewer reran"}],
+        )
+
+    def _exhaust(self, task_graph: Graph, node_id: str) -> None:
+        self._fail_once(task_graph, node_id)
+        task_graph.retry(node_id)
+        self._fail_once(task_graph, node_id)
+
+    def _verify(self, task_graph: Graph, node_id: str) -> None:
+        task_graph.start(node_id, executor_id=f"{node_id}-executor")
+        task_graph.submit(
+            node_id,
+            [{"kind": "test", "summary": "done"}],
+            actor_id=f"{node_id}-executor",
+        )
+        task_graph.verify(
+            node_id,
+            "pass",
+            f"{node_id}-reviewer",
+            checked_criteria=["relevant tests pass"],
+            review_evidence=[{"kind": "independent_test", "summary": "reran"}],
+        )
+
+    def test_a_granted_attempt_raises_the_ceiling_and_keeps_the_failures(self) -> None:
+        task_graph = Graph.from_dict(graph(node("fix", status="ready")))
+        self._exhaust(task_graph, "fix")
+        with self.assertRaisesRegex(HarnessError, "max_attempts"):
+            task_graph.retry("fix")
+
+        ceiling = task_graph.grant_attempt("fix", granted_by="rick", reason="redesign")
+
+        node_after = task_graph.node("fix")
+        self.assertEqual(3, ceiling)
+        self.assertEqual(3, node_after["max_attempts"])
+        # The failures that spent the budget stay spent and stay counted.
+        self.assertEqual(2, node_after["attempts"])
+        self.assertEqual(2, len(node_after["failure_history"]))
+        self.assertEqual("ready", task_graph.retry("fix"))
+        granted = node_after["granted_attempts"]
+        self.assertEqual(1, len(granted))
+        self.assertEqual("rick", granted[0]["granted_by"])
+        self.assertEqual("redesign", granted[0]["reason"])
+        self.assertIn("granted_at", granted[0])
+
+    def test_a_grant_is_refused_on_a_node_that_has_not_failed(self) -> None:
+        task_graph = Graph.from_dict(graph(node("fix", status="ready")))
+
+        with self.assertRaisesRegex(HarnessError, "only a failed or invalidated node"):
+            task_graph.grant_attempt("fix", granted_by="rick", reason="because")
+
+    def test_a_grant_requires_a_grantor_and_a_reason(self) -> None:
+        task_graph = Graph.from_dict(graph(node("fix", status="ready")))
+        self._exhaust(task_graph, "fix")
+
+        for grantor, reason in (("", "r"), ("rick", ""), ("   ", "r"), ("rick", "  ")):
+            with self.assertRaises(HarnessError):
+                task_graph.grant_attempt("fix", granted_by=grantor, reason=reason)
+        self.assertEqual(2, task_graph.node("fix")["max_attempts"])
+
+    def test_a_grant_cannot_climb_past_the_absolute_ceiling(self) -> None:
+        task_graph = Graph.from_dict(
+            graph(node("fix", status="ready", max_attempts=MAX_ATTEMPTS))
+        )
+        self._fail_once(task_graph, "fix")
+
+        with self.assertRaisesRegex(HarnessError, "ceiling"):
+            task_graph.grant_attempt("fix", granted_by="rick", reason="one more")
+
+    def test_superseding_releases_dependents_and_keeps_the_history(self) -> None:
+        task_graph = Graph.from_dict(
+            graph(node("old", status="ready"), node("next", depends_on=["old"]))
+        )
+        self._fail_once(task_graph, "old")
+
+        released = task_graph.supersede("old", reason="approach abandoned")
+
+        self.assertEqual(["next"], released)
+        old = task_graph.node("old")
+        self.assertEqual("superseded", old["status"])
+        self.assertEqual("approach abandoned", old["superseded_reason"])
+        self.assertEqual(1, len(old["failure_history"]))
+        # Released, not restarted: the descendant was invalidated by the
+        # failure and the protocol has one rule about discarded work, that
+        # somebody picks it up again on purpose. What supersede changes is
+        # that retry now accepts it.
+        self.assertEqual("invalidated", task_graph.node("next")["status"])
+        self.assertEqual("ready", task_graph.retry("next"))
+
+    def test_a_verified_node_cannot_be_superseded(self) -> None:
+        task_graph = Graph.from_dict(graph(node("done", status="ready")))
+        self._verify(task_graph, "done")
+
+        with self.assertRaisesRegex(HarnessError, "verified"):
+            task_graph.supersede("done", reason="changed my mind")
+
+    def test_superseding_requires_a_reason(self) -> None:
+        task_graph = Graph.from_dict(graph(node("old", status="ready")))
+        self._fail_once(task_graph, "old")
+
+        with self.assertRaises(HarnessError):
+            task_graph.supersede("old", reason="")
+
+    def test_a_superseded_node_does_not_block_completion(self) -> None:
+        task_graph = Graph.from_dict(
+            graph(node("old", status="ready"), node("next", depends_on=["old"]))
+        )
+        self._fail_once(task_graph, "old")
+        task_graph.supersede("old", reason="approach abandoned")
+        task_graph.retry("next")
+        self._verify(task_graph, "next")
+
+        task_graph.completion_check()
+
+        summary = task_graph.status_summary()
+        self.assertTrue(summary["complete"])
+        # Named, not counted as verified: a reader must see that one node was
+        # retired rather than done.
+        self.assertEqual(["old"], summary["superseded"])
+        self.assertEqual(1, summary["counts"]["verified"])
+        self.assertEqual(1, summary["counts"]["superseded"])

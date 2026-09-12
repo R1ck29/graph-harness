@@ -1,0 +1,5 @@
+{
+  "criterion": "The runtime probe reads pyvenv.cfg through the same bounded opener, so a FIFO there is refused rather than blocking doctor",
+  "kind": "independent_test",
+  "summary": "Reviewer exported both f7baea7^ and f7baea7 and drove the function in a subprocess under a hard 12-second timeout, having first verified PYTHONPATH selects the tree because the package is not installed in the venv. Four file shapes on each tree: a plain config reads identically on both; the FIFO TIMED OUT after 12.0s at the parent and is refused in 0.000249s at HEAD; a 240 KB file was READ at the parent and is refused at HEAD; and the symlink returns None on both, independently confirming the executor's statement that the link case was already held by user_data_path's component walk rather than by the opener. MAX_RUNTIME_CONFIG_BYTES judged sane against this machine's two real pyvenv.cfg files, 334 and 219 bytes, about 196x headroom."
+}

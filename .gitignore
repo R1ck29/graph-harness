@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 .code-review-graph/
 .coverage
+/.test-workspaces/
 /task-graph*.json
 /task-graph*.json.lock
 evals/results/*.json

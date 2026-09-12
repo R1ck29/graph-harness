@@ -1,0 +1,5 @@
+{
+  "criterion": "A node blocked on a superseded dependency and an unsettled one is told to wait for the unsettled one alone",
+  "kind": "independent_test",
+  "summary": "Reviewer built the fixture itself and printed the whole status summary rather than trusting the assertion: later(blocked) -> 'wait for dependencies: pending', abandoned(superseded) -> null, pending(ready) -> 'start pending'. Confirmed not vacuous: tests/helpers.py node() defaults to blocked and _promote_blocked_nodes leaves later blocked because pending is unsettled. Audited every '\"verified\"' occurrence in graph.py (lines 20,21,28,407,426,704,722,899,991,1092) and confirmed none of the remaining ones is a dependency check; graph.py:722 is an eligibility test on the blamed node and SETTLED would be wrong there, because the FAIL path reopens that node and a superseded ancestor would be resurrected. Also confirmed the only consumer of the message is status_summary -> cli status, and that the empty-list rendering is unreachable because validate() promotes blocked nodes first."
+}

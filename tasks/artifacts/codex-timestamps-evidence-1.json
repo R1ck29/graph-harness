@@ -1,0 +1,5 @@
+{
+  "criterion": "conformance.report sorts Codex and hook sessions on one comparable value, and _overlaps needs no type filter to avoid inventing an overlap",
+  "kind": "test",
+  "summary": "codex_sessions._epoch became _timestamp and renders through the new graph.utc_from_epoch, which sits beside utc_now so the two forms cannot drift in offset spelling or precision. Both are whole seconds, so nothing is lost. _overlaps' filter is now on presence rather than on form, and its docstring says so; the consequence is deliberate and stated: a Codex session that really did run alongside another is now reported as contested instead of being silently exempt, because a Codex bound could never be compared before. tests.test_conformance_contract.CodexSessionReaderTests.test_a_codex_timestamp_sorts_against_a_hook_timestamp pins the ordering directly: the recovered value sorts between two ISO bounds, which the integer form could not do because '1788088667' sorts before every '2026-...' as text."
+}

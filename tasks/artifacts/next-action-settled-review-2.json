@@ -1,0 +1,5 @@
+{
+  "criterion": "A test fails if the check reverts to comparing against verified only",
+  "kind": "independent_test",
+  "summary": "Reviewer copied agent_harness/ and tests/ into a scratchpad, reverted graph.py:1012 there, and ran the module: exactly one failure, the named test, with \"'wait for dependencies: pending' != 'wait for dependencies: abandoned, pending'\" - so no other test masks or double-covers the revert. Ran the declared guard independently: '1 of 1 guards pinned by their named test; 0 declared uncovered', and checked the guard's old/new strings match the shipped line verbatim so it cannot silently no-op. Suites: 395 tests OK on 3.12.12 and 395 OK on 3.10.19; black and mypy clean. Noted that the count includes concurrent out-of-scope work by the executor, and re-confirmed this node's four hunks byte-identical before and after."
+}

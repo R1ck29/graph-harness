@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from agent_harness.graph import Graph
 from agent_harness.storage import GraphStore
 
 from tests.helpers import graph, node
+from tests import workspace_root
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 GRAPHCTL = REPOSITORY / "scripts" / "graphctl.py"
@@ -23,7 +25,7 @@ GRAPHCTL = REPOSITORY / "scripts" / "graphctl.py"
 
 class GraphStoreTests(unittest.TestCase):
     def test_round_trip_persists_graph_and_writes_without_temp_artifact(self) -> None:
-        with tempfile.TemporaryDirectory(dir=REPOSITORY) as directory:
+        with tempfile.TemporaryDirectory(dir=workspace_root()) as directory:
             path = Path(directory) / "task-graph.json"
             store = GraphStore(path)
             original = Graph.from_dict(graph(node("plan")))
@@ -34,6 +36,67 @@ class GraphStoreTests(unittest.TestCase):
             self.assertEqual(original.to_dict(), restored.to_dict())
             self.assertTrue(path.exists())
             self.assertEqual([], list(Path(directory).glob("*.tmp")))
+
+    @unittest.skipIf(os.name == "nt", "POSIX named pipe")
+    def test_a_graph_that_is_a_named_pipe_is_refused_rather_than_read(self) -> None:
+        # The defect this node exists for. A FIFO named `task-graph.json` has
+        # a size of zero, so it passed the byte limit the store checked, and
+        # then `open` blocked for ever — taking `validate`, `status`,
+        # `doctor`, `completion-check` and the installed Stop hook with it.
+        # The report loader and the journal reader had each closed this on
+        # their own; the store, which every command reads through, had not.
+        #
+        # Driven on a thread that is joined with a deadline, rather than by
+        # calling and timing it. A test for something that must not block
+        # cannot be allowed to block: asserting on the elapsed time only
+        # works if the call returns, and the first version of this test hung
+        # the whole suite for fifteen minutes under a mutation that removed
+        # the guard. The thread is a daemon so a blocked one cannot keep the
+        # interpreter alive either.
+        with tempfile.TemporaryDirectory(dir=workspace_root()) as directory:
+            path = Path(directory) / "task-graph.json"
+            os.mkfifo(path)
+            outcome: list[object] = []
+
+            def attempt() -> None:
+                try:
+                    outcome.append(GraphStore(path).load())
+                except BaseException as exc:  # noqa: BLE001 - reported below
+                    outcome.append(exc)
+
+            thread = threading.Thread(target=attempt, daemon=True)
+            thread.start()
+            thread.join(15.0)
+
+            self.assertFalse(thread.is_alive(), "the read blocked on the pipe")
+            self.assertEqual(1, len(outcome))
+            refusal = outcome[0]
+            self.assertIsInstance(refusal, HarnessError)
+            self.assertIn("not_a_regular_file", str(refusal))
+
+    @unittest.skipIf(os.name == "nt", "POSIX symlink")
+    def test_a_graph_reached_through_a_symlink_is_refused(self) -> None:
+        # Refused by the store itself, not by the caller. Both of today's
+        # callers resolve through `workspace_path` first, which refuses a
+        # link-like component — but that is their choice, and a third caller
+        # reading the store directly inherited nothing.
+        with tempfile.TemporaryDirectory(dir=workspace_root()) as directory:
+            real = Path(directory) / "real-graph.json"
+            GraphStore(real).save(Graph.from_dict(graph(node("plan"))))
+            link = Path(directory) / "task-graph.json"
+            link.symlink_to(real)
+
+            with self.assertRaisesRegex(HarnessError, "symlink"):
+                GraphStore(link).load()
+
+    def test_a_missing_graph_still_says_how_to_create_one(self) -> None:
+        # The message a person sees most often, and the one thing the new
+        # refusals must not have replaced with an errno.
+        with tempfile.TemporaryDirectory(dir=workspace_root()) as directory:
+            path = Path(directory) / "task-graph.json"
+
+            with self.assertRaisesRegex(HarnessError, "graph file not found"):
+                GraphStore(path).load()
 
 
 class GraphCtlAtomicityTests(unittest.TestCase):
@@ -59,7 +122,7 @@ class GraphCtlAtomicityTests(unittest.TestCase):
         path.write_text(json.dumps(payload), encoding="utf-8")
 
     def test_init_creates_ready_graph_and_refuses_to_overwrite_it(self) -> None:
-        with tempfile.TemporaryDirectory(dir=REPOSITORY) as directory:
+        with tempfile.TemporaryDirectory(dir=workspace_root()) as directory:
             path = Path(directory) / "new-graph.json"
             arguments = (
                 "--graph",
@@ -89,7 +152,7 @@ class GraphCtlAtomicityTests(unittest.TestCase):
             self.assertEqual(before, path.read_text(encoding="utf-8"))
 
     def test_init_does_not_overwrite_file_created_during_publish(self) -> None:
-        with tempfile.TemporaryDirectory(dir=REPOSITORY) as directory:
+        with tempfile.TemporaryDirectory(dir=workspace_root()) as directory:
             path = Path(directory) / "raced-graph.json"
             arguments = cli.build_parser().parse_args(
                 [
@@ -115,7 +178,7 @@ class GraphCtlAtomicityTests(unittest.TestCase):
             self.assertEqual("competitor data\n", path.read_text(encoding="utf-8"))
 
     def test_doctor_reports_graph_and_lock_without_changing_either(self) -> None:
-        with tempfile.TemporaryDirectory(dir=REPOSITORY) as directory:
+        with tempfile.TemporaryDirectory(dir=workspace_root()) as directory:
             path = Path(directory) / "task-graph.json"
             lock_path = path.with_suffix(path.suffix + ".lock")
             self._write_graph(path, graph(node("plan")))
@@ -145,14 +208,14 @@ class GraphCtlAtomicityTests(unittest.TestCase):
             self.assertIn("shell history", help_result.stdout)
 
     def test_evidence_file_must_be_a_regular_file(self) -> None:
-        with tempfile.TemporaryDirectory(dir=REPOSITORY) as directory:
+        with tempfile.TemporaryDirectory(dir=workspace_root()) as directory:
             relative = Path(directory).relative_to(REPOSITORY)
 
             with self.assertRaisesRegex(HarnessError, "regular file"):
                 cli._evidence(f"@{relative}")
 
     def test_happy_path_persists_each_cli_state_transition(self) -> None:
-        with tempfile.TemporaryDirectory(dir=REPOSITORY) as directory:
+        with tempfile.TemporaryDirectory(dir=workspace_root()) as directory:
             path = Path(directory) / "task-graph.json"
             self._write_graph(path, graph(node("plan")))
 
@@ -196,7 +259,7 @@ class GraphCtlAtomicityTests(unittest.TestCase):
             self.assertEqual("reviewer", saved["nodes"][0]["reviewer_id"])
 
     def test_uncertain_cli_result_explains_and_supports_safe_resubmission(self) -> None:
-        with tempfile.TemporaryDirectory(dir=REPOSITORY) as directory:
+        with tempfile.TemporaryDirectory(dir=workspace_root()) as directory:
             path = Path(directory) / "task-graph.json"
             self._write_graph(path, graph(node("plan")))
             self.assertEqual(
@@ -247,7 +310,7 @@ class GraphCtlAtomicityTests(unittest.TestCase):
             self.assertIsNone(saved["nodes"][0].get("verification"))
 
     def test_failed_cli_command_does_not_partially_mutate_graph_file(self) -> None:
-        with tempfile.TemporaryDirectory(dir=REPOSITORY) as directory:
+        with tempfile.TemporaryDirectory(dir=workspace_root()) as directory:
             path = Path(directory) / "task-graph.json"
             original = graph(node("plan"))
             self._write_graph(path, original)
@@ -266,7 +329,7 @@ class GraphCtlAtomicityTests(unittest.TestCase):
             self.assertEqual(original, json.loads(path.read_text(encoding="utf-8")))
 
     def test_graph_save_error_does_not_create_false_failure_record(self) -> None:
-        with tempfile.TemporaryDirectory(dir=REPOSITORY) as directory:
+        with tempfile.TemporaryDirectory(dir=workspace_root()) as directory:
             path = Path(directory) / "task-graph.json"
             task_graph = Graph.from_dict(graph(node("plan")))
             task_graph.start("plan", executor_id="impl")
@@ -304,7 +367,7 @@ class GraphCtlAtomicityTests(unittest.TestCase):
             self.assertEqual(before, json.loads(path.read_text(encoding="utf-8")))
 
     def test_failure_query_reads_bounded_graph_resident_history(self) -> None:
-        with tempfile.TemporaryDirectory(dir=REPOSITORY) as directory:
+        with tempfile.TemporaryDirectory(dir=workspace_root()) as directory:
             path = Path(directory) / "task-graph.json"
             task_graph = Graph.from_dict(graph(node("plan")))
             task_graph.start("plan", executor_id="impl")
@@ -346,7 +409,7 @@ class GraphCtlAtomicityTests(unittest.TestCase):
     def test_parent_directory_graph_is_refused_with_working_directory_guidance(
         self,
     ) -> None:
-        with tempfile.TemporaryDirectory(dir=REPOSITORY) as directory:
+        with tempfile.TemporaryDirectory(dir=workspace_root()) as directory:
             root = Path(directory)
             self._write_graph(root / "task-graph.json", graph(node("plan")))
             nested = root / "package"
@@ -371,7 +434,7 @@ class GraphCtlAtomicityTests(unittest.TestCase):
             self.assertIn("run the command from the directory", rejected.stderr)
 
     def test_missing_graph_names_the_recovery_commands(self) -> None:
-        with tempfile.TemporaryDirectory(dir=REPOSITORY) as directory:
+        with tempfile.TemporaryDirectory(dir=workspace_root()) as directory:
             missing = subprocess.run(
                 [sys.executable, str(GRAPHCTL), "ready"],
                 cwd=Path(directory),
@@ -398,7 +461,7 @@ class GraphCtlAuthoringTests(unittest.TestCase):
         )
 
     def test_add_node_builds_a_dag_and_rejects_a_bad_addition_atomically(self) -> None:
-        with tempfile.TemporaryDirectory(dir=REPOSITORY) as directory:
+        with tempfile.TemporaryDirectory(dir=workspace_root()) as directory:
             path = Path(directory) / "task-graph.json"
             created = self._run(
                 "--graph",

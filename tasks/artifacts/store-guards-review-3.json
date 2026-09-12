@@ -1,0 +1,5 @@
+{
+  "criterion": "One timestamp form reaches every consumer of a session verdict",
+  "kind": "independent_test",
+  "summary": "Pointer verified: codex-timestamps verified at attempts=2, codex_sessions imports utc_from_epoch from graph and returns it, and the function is defined beside utc_now."
+}

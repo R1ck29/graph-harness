@@ -1,0 +1,5 @@
+{
+  "criterion": "A refusal reason names what actually refused the file, including when the stat itself failed",
+  "kind": "independent_test",
+  "summary": "Defect and fix both reproduced: at the parent two ordinary months read 'not a plain file' with the directory at 0o400; at HEAD they read 'cannot be stat-ed'. All four reasons probed and each judged correct, including a broken symlink, which the reviewer reasoned through rather than assumed - lstat succeeds and returns S_IFLNK, so S_ISREG short-circuits and the file genuinely is not a plain file. It searched for a state where lstat succeeds but is_link_like raises and found none reachable, because Path.is_symlink re-lstats the same path and the race lands in the same arm. One LOW gap recorded: the per-file try catches only OSError while both enclosing ones also catch ValueError, so an injected ValueError would escape and falsify the 'never raises' docstring - unreachable in practice. Confirmed the ('', reason) sentinel has exactly one production consumer and leaks nowhere else."
+}

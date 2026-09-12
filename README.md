@@ -23,6 +23,9 @@ Objective -> Planner -> Task Graph -> Executor/Specialist -> Reviewer
 contract. `roles/` and `skills/` hold on-demand procedures. `.codex/`,
 `.claude/`, and `adapters/` map equivalent behavior to each client.
 
+New to this? [docs/how-it-works.md](docs/how-it-works.md) explains the whole
+repository in plain language, with no programming knowledge assumed.
+
 ## Before you start
 
 Requires Python 3.10 or newer.
@@ -158,8 +161,8 @@ an opt-in settings example because hooks execute repository code. Use
 `adapters/claude/README.md`.
 
 After a PC-wide install, user-scoped skills, `graph-reviewer`, and the Stop hook
-are available in unrelated repositories. The hook exits immediately when no
-`task-graph.json` exists.
+are available in unrelated repositories. When no `task-graph.json` exists, the
+hook records the turn and returns success without a completion check.
 
 ## Verification and retry
 

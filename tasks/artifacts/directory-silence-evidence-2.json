@@ -1,0 +1,5 @@
+{
+  "criterion": "A refusal reason names what actually refused the file, including when the stat itself failed",
+  "kind": "test",
+  "summary": "is_named_month answers False both for a file of the wrong type and for one it could not stat, so with the directory listable and its children unstattable two ordinary months were reported as 'not a plain file'. That sends someone to replace a file that is already correct, which is worse than saying nothing. The three reasons are now named constants and the stat failure has its own: SKIP_CANNOT_BE_STATED. Pinned by test_a_month_whose_stat_fails_is_not_called_the_wrong_kind_of_file, which asserts the right reason appears AND that the wrong one does not - the second half is what a mutation swapping the constants has to fail."
+}

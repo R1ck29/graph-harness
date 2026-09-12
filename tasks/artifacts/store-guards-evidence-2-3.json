@@ -1,0 +1,5 @@
+{
+  "criterion": "One timestamp form reaches every consumer of a session verdict",
+  "kind": "observation",
+  "summary": "Done and verified in node codex-timestamps (PASS, attempt 2 after a FAIL). codex_sessions renders through graph.utc_from_epoch, which sits beside utc_now so the two cannot drift, and a reviewer confirmed a Codex session now sorts between two hook sessions. The FAIL was substantive: making the bounds comparable made a thread row's lifetime look like an overlap, so every verdict now carries `bounds` and only observed windows contest. Same reason as above for this criterion appearing on this node."
+}

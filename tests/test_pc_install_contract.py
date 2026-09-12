@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -41,6 +42,9 @@ class PcInstallContractTests(unittest.TestCase):
         suffix = ".exe" if os.name == "nt" else ""
         self.graphctl = self._fake_executable(f"graphctl{suffix}")
         self.stop_guard = self._fake_executable(f"graphctl-claude-stop{suffix}")
+        self.session_start = self._fake_executable(f"graphctl-session-start{suffix}")
+        self.session_end = self._fake_executable(f"graphctl-session-end{suffix}")
+        self.edit_hook = self._fake_executable(f"graphctl-edit{suffix}")
 
     def _fake_executable(self, name: str) -> Path:
         executable = self.runtime_bin / name
@@ -108,6 +112,425 @@ class PcInstallContractTests(unittest.TestCase):
                 }:
                     commands.append(command)
         return commands
+
+    def _codex_hooks(self) -> dict[str, Any]:
+        return cast(
+            "dict[str, Any]",
+            json.loads((self.codex / "hooks.json").read_text(encoding="utf-8")),
+        )
+
+    @staticmethod
+    def _managed_events(document: dict[str, Any]) -> dict[str, list[str]]:
+        """Return the managed command installed under each hook event."""
+
+        managed: dict[str, list[str]] = {}
+        for event, matchers in document.get("hooks", {}).items():
+            for matcher in matchers if isinstance(matchers, list) else []:
+                for hook in (
+                    matcher.get("hooks", []) if isinstance(matcher, dict) else []
+                ):
+                    command = hook.get("command")
+                    if isinstance(command, str) and Path(command).stem in {
+                        "graphctl-claude-stop",
+                        "graphctl-session-start",
+                        "graphctl-session-end",
+                        "graphctl-edit",
+                    }:
+                        managed.setdefault(event, []).append(command)
+        return managed
+
+    def test_every_managed_event_is_installed_on_both_clients(self) -> None:
+        self._install()
+
+        for document in (self._settings(), self._codex_hooks()):
+            managed = self._managed_events(document)
+            self.assertEqual(
+                {"SessionStart", "Stop", "SessionEnd", "PostToolUse"},
+                set(managed),
+                document,
+            )
+            self.assertEqual([str(self.session_start)], managed["SessionStart"])
+            self.assertEqual([str(self.stop_guard)], managed["Stop"])
+            self.assertEqual([str(self.session_end)], managed["SessionEnd"])
+            self.assertEqual([str(self.edit_hook)], managed["PostToolUse"])
+
+    def test_the_edit_hook_carries_the_matcher_that_selects_editing_tools(
+        self,
+    ) -> None:
+        # Without a matcher the hook would run after every tool call, and the
+        # producer would pay its cost on reads and searches too.
+        self._install()
+
+        for document in (self._settings(), self._codex_hooks()):
+            # Walked, not string-matched against the serialised form.
+            # `str(self.edit_hook) in json.dumps(matcher)` passes on POSIX
+            # and can never pass on Windows, where the path's backslashes
+            # are escaped as `\\` in the JSON text and the raw path is
+            # therefore not a substring of it.
+            entries = [
+                matcher
+                for matcher in document["hooks"]["PostToolUse"]
+                if any(
+                    hook.get("command") == str(self.edit_hook)
+                    for hook in matcher.get("hooks", [])
+                )
+            ]
+            self.assertEqual(1, len(entries), document)
+            self.assertEqual(
+                "Edit|Write|MultiEdit|NotebookEdit", entries[0].get("matcher")
+            )
+
+    def test_an_unrelated_claude_post_tool_use_entry_survives(self) -> None:
+        # This event was unmanaged until now, and a real machine already has a
+        # third-party entry on it.
+        self.claude.mkdir(parents=True, exist_ok=True)
+        original = {
+            "hooks": {
+                "PostToolUse": [
+                    {
+                        "matcher": "Edit|Write",
+                        "hooks": [{"type": "command", "command": "someone-elses-tool"}],
+                    }
+                ]
+            }
+        }
+        (self.claude / "settings.json").write_text(
+            json.dumps(original, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+
+        self._install()
+
+        installed = self._settings()
+        self.assertIn(
+            original["hooks"]["PostToolUse"][0], installed["hooks"]["PostToolUse"]
+        )
+
+        self._run("--uninstall")
+
+        self.assertEqual(original, self._settings())
+
+    def _edit_managed_entry(self, **changes: Any) -> None:
+        """Modify our own PostToolUse entry the way a curious user would."""
+
+        path = self.claude / "settings.json"
+        document = json.loads(path.read_text(encoding="utf-8"))
+        for matcher in document["hooks"]["PostToolUse"]:
+            for hook in matcher.get("hooks", []):
+                if Path(str(hook.get("command"))).stem == "graphctl-edit":
+                    hook.update(changes)
+        path.write_text(
+            json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+
+    def _managed_edit_entries(self) -> list[Any]:
+        return [
+            hook
+            for matcher in self._settings()["hooks"].get("PostToolUse", [])
+            for hook in matcher.get("hooks", [])
+            if Path(str(hook.get("command"))).stem == "graphctl-edit"
+        ]
+
+    def test_a_user_edited_managed_entry_is_replaced_not_duplicated(self) -> None:
+        # Recognition keyed on the timeout and the args as well as the
+        # command, so raising the timeout made our own entry unrecognisable
+        # and the next install appended a second one. PostToolUse fires on
+        # every edit, so the duplicate is paid on every edit.
+        self._install()
+
+        for change in (
+            {"timeout": 30},
+            {"args": ["--verbose"]},
+            {"timeout": 5, "args": ["--x"]},
+            {"note": "left by a person"},
+        ):
+            with self.subTest(change=change):
+                self._edit_managed_entry(**change)
+                self._install()
+
+                self.assertEqual(1, len(self._managed_edit_entries()), change)
+
+    def test_a_user_edited_managed_entry_is_reported_as_drift(self) -> None:
+        self._install()
+        self._edit_managed_entry(timeout=30)
+
+        drifted = self._run("--check")
+
+        self.assertEqual(2, drifted.returncode)
+        self.assertIn("hook drift", drifted.stderr)
+
+    def test_a_third_party_entry_sharing_our_matcher_survives(self) -> None:
+        self.claude.mkdir(parents=True, exist_ok=True)
+        foreign = {
+            "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+            "hooks": [{"type": "command", "command": "someone-elses-tool"}],
+        }
+        (self.claude / "settings.json").write_text(
+            json.dumps({"hooks": {"PostToolUse": [foreign]}}, indent=2, sort_keys=True)
+            + "\n",
+            encoding="utf-8",
+        )
+
+        self._install()
+        self._edit_managed_entry(timeout=30)
+        self._install()
+
+        entries = self._settings()["hooks"]["PostToolUse"]
+        self.assertIn("someone-elses-tool", json.dumps(entries))
+        self.assertEqual(1, len(self._managed_edit_entries()))
+
+        self._run("--uninstall")
+
+        self.assertEqual({"hooks": {"PostToolUse": [foreign]}}, self._settings())
+
+    def test_every_managed_event_holds_one_entry_after_an_edit_and_reinstall(
+        self,
+    ) -> None:
+        self._install()
+        self._edit_managed_entry(timeout=30)
+        self._install()
+
+        for document in (self._settings(), self._codex_hooks()):
+            for event, commands in self._managed_events(document).items():
+                self.assertEqual(1, len(commands), f"{event}: {commands}")
+
+    def test_an_install_says_which_edited_entry_it_replaced(self) -> None:
+        # A repeated install replaces our entries rather than appending, so a
+        # raised timeout is reverted. That is correct — two entries would run
+        # the hook twice per edit — but reverting it silently leaves the
+        # person who made the edit with no way to learn why it stopped
+        # taking effect.
+        self._install()
+        self._edit_managed_entry(timeout=30)
+
+        result = self._install()
+
+        self.assertIn("replacing edited harness hook", result.stdout)
+        self.assertIn("PostToolUse", result.stdout)
+        self.assertIn("settings.json", result.stdout)
+        self.assertEqual(1, len(self._managed_edit_entries()))
+        self.assertEqual(10, self._managed_edit_entries()[0]["timeout"])
+
+    def test_an_untouched_reinstall_says_nothing_about_replacing(self) -> None:
+        # The notice must mean something. Printing it on every install would
+        # train the reader to ignore it.
+        self._install()
+
+        result = self._install()
+
+        self.assertNotIn("replacing edited harness hook", result.stdout)
+
+    def test_check_ignores_a_reformatted_settings_file(self) -> None:
+        # The clients own these files and rewrite them whenever a setting
+        # changes, in their own key order and indentation. Comparing the
+        # serialised bytes reported every such rewrite as hook drift on a
+        # machine where the hooks were untouched, and a check that is always
+        # red is a check nobody reads.
+        self._install()
+        path = self.claude / "settings.json"
+        document = json.loads(path.read_text(encoding="utf-8"))
+        reordered = dict(reversed(list(document.items())))
+        path.write_text(json.dumps(reordered, indent=4), encoding="utf-8")
+        self.assertNotEqual(
+            json.dumps(document, indent=2, sort_keys=True) + "\n",
+            path.read_text(encoding="utf-8"),
+        )
+
+        checked = self._run("--check")
+
+        self.assertEqual(0, checked.returncode, checked.stdout + checked.stderr)
+        self.assertIn("in sync", checked.stdout)
+
+    def test_check_still_reports_a_changed_managed_entry(self) -> None:
+        # The value comparison must not be a way of not looking. A hand
+        # edit to one of our own entries is a real difference and stays drift.
+        self._install()
+        self._edit_managed_entry(timeout=30)
+
+        drifted = self._run("--check")
+
+        self.assertEqual(2, drifted.returncode)
+        self.assertIn("hook drift", drifted.stderr)
+
+    def test_a_third_party_hook_is_never_drift_whichever_side_of_ours_it_sits(
+        self,
+    ) -> None:
+        # This test used to assert the opposite, on the stated grounds that
+        # "the installer writes the whole file, so a change it did not make
+        # is drift". That was false twice over. The installer does not own
+        # other people's entries — a whole verified node exists to make them
+        # survive a reinstall — and the old assertion passed only because of
+        # ordering: a rebuild appends ours last, so an unowned entry placed
+        # *after* ours shifted position and read as drift, while the
+        # identical entry placed *before* ours read as clean. Position is
+        # not a difference anyone made on purpose, and a check that goes
+        # permanently red when another tool appends a hook is a check
+        # nobody reads.
+        for position in ("before", "after"):
+            with self.subTest(position=position):
+                # Reset between positions. `setUp` runs once per test method,
+                # not per subtest, so without this the second position ran
+                # over the entry the first had left and checked
+                # [third, ours, third] rather than the pair it names.
+                shutil.rmtree(self.claude, ignore_errors=True)
+                shutil.rmtree(self.codex, ignore_errors=True)
+                self._install()
+                path = self.claude / "settings.json"
+                document = json.loads(path.read_text(encoding="utf-8"))
+                entries = document["hooks"]["SessionStart"]
+                third = {"hooks": [{"type": "command", "command": "/somewhere/else"}]}
+                if position == "after":
+                    entries.append(third)
+                else:
+                    entries.insert(0, third)
+                path.write_text(json.dumps(document, indent=2), encoding="utf-8")
+
+                checked = self._run("--check")
+
+                self.assertEqual(0, checked.returncode, checked.stdout + checked.stderr)
+                self.assertIn("in sync", checked.stdout)
+                # And it is still there afterwards: --check changes nothing.
+                after = json.loads(path.read_text(encoding="utf-8"))
+                self.assertIn(third, after["hooks"]["SessionStart"])
+
+    def test_check_reports_drift_for_a_changed_managed_matcher(self) -> None:
+        # The matcher is not decoration: it is why the edit hook runs after
+        # editing tools and not after every read and search. Widening it to
+        # everything would pay the hook's cost on every tool call, so a
+        # hand-edited matcher has to be drift.
+        #
+        # Written because a mutation found it unpinned: making the
+        # comparison ignore the matcher field left the suite green while
+        # making both this case and a removed matcher invisible.
+        self._install()
+        path = self.claude / "settings.json"
+        document = json.loads(path.read_text(encoding="utf-8"))
+        for matcher in document["hooks"]["PostToolUse"]:
+            if any(
+                Path(str(h.get("command"))).stem == "graphctl-edit"
+                for h in matcher.get("hooks", [])
+            ):
+                matcher["matcher"] = ".*"
+        path.write_text(json.dumps(document, indent=2), encoding="utf-8")
+
+        drifted = self._run("--check")
+
+        self.assertEqual(2, drifted.returncode)
+        self.assertIn("hook drift", drifted.stderr)
+
+    def test_check_reports_drift_for_a_managed_entry_moved_to_another_event(
+        self,
+    ) -> None:
+        # An entry under the wrong event fires at the wrong moment, which is
+        # a different program. Comparing the managed entries per event is
+        # what catches it; flattening them across events does not, and that
+        # mutation left the suite green.
+        self._install()
+        path = self.claude / "settings.json"
+        document = json.loads(path.read_text(encoding="utf-8"))
+        moved = document["hooks"]["PostToolUse"].pop()
+        document["hooks"]["Stop"].append(moved)
+        path.write_text(json.dumps(document, indent=2), encoding="utf-8")
+
+        drifted = self._run("--check")
+
+        self.assertEqual(2, drifted.returncode)
+        self.assertIn("hook drift", drifted.stderr)
+
+    def test_check_reports_drift_for_a_duplicated_managed_entry(self) -> None:
+        # Two of ours under one event would run the hook twice for every
+        # edit, which is what the whole managed-entry design exists to
+        # prevent, so a hand-duplicated entry has to be drift.
+        #
+        # Written because a mutation found it unpinned: collapsing the
+        # managed entries to one per command left the suite green while
+        # making this case invisible. The comment beside the code claimed
+        # the list form was load-bearing and nothing held it to that.
+        self._install()
+        path = self.claude / "settings.json"
+        document = json.loads(path.read_text(encoding="utf-8"))
+        entries = document["hooks"]["PostToolUse"]
+        entries.append(json.loads(json.dumps(entries[0])))
+        path.write_text(json.dumps(document, indent=2), encoding="utf-8")
+
+        drifted = self._run("--check")
+
+        self.assertEqual(2, drifted.returncode)
+        self.assertIn("hook drift", drifted.stderr)
+
+    def test_check_reports_drift_for_a_removed_edit_hook(self) -> None:
+        self._install()
+        document = self._settings()
+        document["hooks"].pop("PostToolUse")
+        (self.claude / "settings.json").write_text(
+            json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+
+        drifted = self._run("--check")
+
+        self.assertEqual(2, drifted.returncode)
+        self.assertIn("hook drift", drifted.stderr)
+        self.assertEqual(document, self._settings())
+
+    def test_a_repeated_install_adds_no_second_entry_to_any_event(self) -> None:
+        self._install()
+        self._install()
+
+        for document in (self._settings(), self._codex_hooks()):
+            for event, commands in self._managed_events(document).items():
+                self.assertEqual(1, len(commands), f"{event}: {commands}")
+
+    def test_unrelated_codex_hooks_survive_install_and_uninstall(self) -> None:
+        self.codex.mkdir(parents=True, exist_ok=True)
+        original: dict[str, dict[str, Any]] = {
+            "hooks": {
+                "PostToolUse": [
+                    {
+                        "matcher": "Edit|Write",
+                        "hooks": [{"type": "command", "command": "someone-elses-tool"}],
+                    }
+                ],
+                "Stop": [
+                    {
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "echo graphctl-claude-stop is user-owned",
+                            }
+                        ]
+                    }
+                ],
+            }
+        }
+        (self.codex / "hooks.json").write_text(
+            json.dumps(original, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+
+        self._install()
+        installed = self._codex_hooks()
+        # PostToolUse is a managed event now, so the third-party entry is kept
+        # beside ours rather than being the only one.
+        self.assertIn(
+            original["hooks"]["PostToolUse"][0], installed["hooks"]["PostToolUse"]
+        )
+        self.assertIn(original["hooks"]["Stop"][0], installed["hooks"]["Stop"])
+
+        self._run("--uninstall")
+
+        self.assertEqual(original, self._codex_hooks())
+
+    def test_check_reports_drift_for_a_removed_event(self) -> None:
+        self._install()
+        document = self._codex_hooks()
+        document["hooks"].pop("SessionStart")
+        (self.codex / "hooks.json").write_text(
+            json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+
+        drifted = self._run("--check")
+
+        self.assertEqual(2, drifted.returncode)
+        self.assertIn("hook drift", drifted.stderr)
+        self.assertIn("hooks.json", drifted.stderr)
 
     def _skill(self, client: Path, skill_name: str) -> Path:
         return client / "skills" / skill_name / "SKILL.md"
@@ -392,7 +815,13 @@ class PcInstallContractTests(unittest.TestCase):
         spaced_home.mkdir()
         runtime_bin = spaced_home / "runtime with spaces"
         runtime_bin.mkdir()
-        for name in ("graphctl", "graphctl-claude-stop"):
+        for name in (
+            "graphctl",
+            "graphctl-claude-stop",
+            "graphctl-session-start",
+            "graphctl-session-end",
+            "graphctl-edit",
+        ):
             executable = runtime_bin / name
             executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             executable.chmod(executable.stat().st_mode | stat.S_IXUSR)

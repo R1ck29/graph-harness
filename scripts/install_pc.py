@@ -14,13 +14,17 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Sequence, cast
+from typing import Any, Iterator, Sequence, cast
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from agent_harness.paths import is_link_like  # noqa: E402
+from agent_harness.paths import (  # noqa: E402
+    INSTALL_DIRECTORY,
+    is_link_like,
+)
+from agent_harness.session_hooks import EDIT_TOOLS  # noqa: E402
 
 SKILL_NAMES = (
     "graph-planning",
@@ -30,8 +34,29 @@ SKILL_NAMES = (
 )
 MANAGED_BEGIN = "<!-- BEGIN graph-engineering-agent-harness -->"
 MANAGED_END = "<!-- END graph-engineering-agent-harness -->"
-HOOK_MARKER = "graphctl-claude-stop"
-INSTALL_DIRECTORY = Path(".local/share/graph-engineering-agent-harness")
+# The hook events this installer manages, in the order it writes them.
+MANAGED_HOOK_EVENTS = ("SessionStart", "Stop", "SessionEnd", "PostToolUse")
+
+# Events whose entry carries a matcher. Without one the edit hook would run
+# after every tool call, paying its cost on reads and searches, and the
+# producer would record whatever the client happened to be configured with.
+# The producer refuses a tool outside `EDIT_TOOLS` as well, so the matcher is
+# a cost control rather than the only filter — which is why it is derived from
+# that list rather than restated beside it: a tool added there and left out
+# here records nothing while the suite stays green, and that is exactly how
+# notebook edits were dropped once already.
+MANAGED_HOOK_MATCHERS = {"PostToolUse": "|".join(EDIT_TOOLS)}
+
+# The client files this installer writes into, relative to the selected home.
+# Install, check and uninstall each read the same two hook files and the same
+# two instruction files, and a layout spelled out separately in each of them
+# is a layout that drifts in one and not the others.
+CLAUDE_SETTINGS = Path(".claude/settings.json")
+CODEX_HOOKS = Path(".codex/hooks.json")
+CLAUDE_INSTRUCTIONS = Path(".claude/CLAUDE.md")
+CODEX_INSTRUCTIONS = Path(".codex/AGENTS.md")
+# Windows names console scripts with an extension; POSIX does not.
+EXECUTABLE_SUFFIX = ".exe" if os.name == "nt" else ""
 MANAGED_PATTERN = re.compile(
     rf"(?:\n)?{re.escape(MANAGED_BEGIN)}\n.*?{re.escape(MANAGED_END)}(?:\n)?",
     re.DOTALL,
@@ -81,86 +106,230 @@ def _without_managed_instructions(existing: str) -> str:
 
 
 def _load_settings(path: Path) -> dict[str, Any]:
+    """Parse one client's hook document, naming it if it cannot be merged.
+
+    Two clients are merged now, so an error that names only one sends the
+    reader to the wrong file.
+    """
+
     if not path.exists():
         return {}
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise InstallError(f"cannot safely merge Claude settings: {exc}") from exc
+        raise InstallError(f"cannot safely merge {path}: {exc}") from exc
     if not isinstance(value, dict):
-        raise InstallError("Claude settings must contain a JSON object")
+        raise InstallError(f"{path} must contain a JSON object")
     return cast("dict[str, Any]", value)
 
 
 def _without_managed_hooks(
     settings: dict[str, Any], managed_commands: set[str]
 ) -> dict[str, Any]:
+    """Remove only this harness's own hook entries, from every event it uses.
+
+    Everything else in the document is copied through untouched, including
+    other events, other entries under the same event, and matcher shapes this
+    installer does not produce. An event left with no entries is removed
+    rather than left as an empty list, so an install followed by an uninstall
+    returns the file to what it was.
+    """
+
     result = cast("dict[str, Any]", json.loads(json.dumps(settings)))
     hooks = result.get("hooks")
     if not isinstance(hooks, dict):
         return result
-    stop = hooks.get("Stop")
-    if not isinstance(stop, list):
-        return result
-    retained: list[Any] = []
-    for matcher in stop:
-        if not isinstance(matcher, dict):
-            retained.append(matcher)
+    for event in MANAGED_HOOK_EVENTS:
+        configured = hooks.get(event)
+        if not isinstance(configured, list):
             continue
-        entries = matcher.get("hooks")
-        if not isinstance(entries, list):
-            retained.append(matcher)
-            continue
-        filtered = [
-            entry for entry in entries if not _is_managed_hook(entry, managed_commands)
-        ]
-        if filtered:
-            copy = dict(matcher)
-            copy["hooks"] = filtered
-            retained.append(copy)
-    if retained:
-        hooks["Stop"] = retained
-    else:
-        hooks.pop("Stop", None)
+        retained: list[Any] = []
+        for matcher in configured:
+            if not isinstance(matcher, dict):
+                retained.append(matcher)
+                continue
+            entries = matcher.get("hooks")
+            if not isinstance(entries, list):
+                retained.append(matcher)
+                continue
+            filtered = [
+                entry
+                for entry in entries
+                if not _is_managed_hook(entry, managed_commands)
+            ]
+            if filtered:
+                copy = dict(matcher)
+                copy["hooks"] = filtered
+                retained.append(copy)
+        if retained:
+            hooks[event] = retained
+        else:
+            hooks.pop(event, None)
     if not hooks:
         result.pop("hooks", None)
     return result
 
 
 def _is_managed_hook(entry: Any, managed_commands: set[str]) -> bool:
-    """Recognize only the exact exec-form hook or its legacy shell-form shape."""
+    """Recognize our own hook entry by the command it runs, and nothing else.
+
+    The command is an absolute path into the runtime this installer built, so
+    it identifies the entry on its own. Matching on the timeout and the
+    argument list as well was stricter and worse: a person who raised the
+    timeout, or added an argument, made our entry unrecognisable, so the next
+    install appended a second one and the hook ran twice for every edit.
+    Recognising the entry means a repeated install *replaces* it, which is
+    also what makes the drift check able to see a hand edit at all.
+
+    Nothing here loosens the boundary around other people's entries. A
+    command equal to one of ours is one of ours: it names a path only this
+    installer writes.
+    """
 
     if not isinstance(entry, dict):
         return False
-    if entry.get("type") != "command" or entry.get("command") not in managed_commands:
-        return False
-    if entry.get("timeout") != 10:
-        return False
-    return "args" not in entry or entry.get("args") == []
+    return entry.get("type") == "command" and entry.get("command") in managed_commands
 
 
-def _with_managed_hook(
-    settings: dict[str, Any], command: str, previous_commands: set[str]
+def _managed_walk(
+    settings: dict[str, Any], managed_commands: set[str]
+) -> Iterator[tuple[str, dict[str, Any]]]:
+    """Yield each managed entry with its event, in the order the file holds them.
+
+    Every check that reads these files has to make the same descent, and each
+    level of it answers a malformed document by stepping over it rather than
+    raising. Written twice, the two copies were free to disagree about what
+    counts as one of our entries, which is the one question both exist to
+    answer. The matcher is carried onto the entry because it belongs to the
+    surrounding object and is lost once the entry is read alone.
+    """
+
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return
+    for event in MANAGED_HOOK_EVENTS:
+        configured = hooks.get(event)
+        if not isinstance(configured, list):
+            continue
+        for matcher in configured:
+            if not isinstance(matcher, dict):
+                continue
+            entries = matcher.get("hooks")
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not _is_managed_hook(entry, managed_commands):
+                    continue
+                carried = dict(entry)
+                carried["matcher"] = matcher.get("matcher")
+                yield event, carried
+
+
+def _managed_entries(
+    settings: dict[str, Any], managed_commands: set[str]
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """Return the managed hook entries already in a settings document.
+
+    Keyed by event and command, so an entry can be compared against the one
+    about to replace it. Only entries this installer recognises as its own
+    are returned; everything else in the file is none of its business.
+    """
+
+    found: dict[tuple[str, str], dict[str, Any]] = {}
+    for event, carried in _managed_walk(settings, managed_commands):
+        command = carried.get("command")
+        if isinstance(command, str):
+            found[(event, command)] = carried
+    return found
+
+
+def _managed_shape(
+    settings: dict[str, Any], managed_commands: set[str]
+) -> dict[str, list[dict[str, Any]]]:
+    """Return the managed entries per event, in order, and nothing else.
+
+    This is what the installer owns and therefore all it may call drift.
+    Comparing whole documents made an unowned entry's *position* decide the
+    answer: a third-party hook sitting after ours changed the rebuilt order,
+    because a rebuild always appends ours last, so it read as drift, while
+    the identical hook placed before ours read as clean. Position is not a
+    difference anyone made on purpose, and a check that goes permanently red
+    when another tool appends a hook is a check nobody reads — the same
+    failure as comparing serialised bytes, one layer in.
+
+    Entries are kept as a list rather than a set so a duplicated managed
+    entry still differs from a single one: two of ours would run the hook
+    twice per event, which is the thing the whole managed-entry design
+    exists to prevent.
+    """
+
+    shape: dict[str, list[dict[str, Any]]] = {
+        event: [] for event in MANAGED_HOOK_EVENTS
+    }
+    for event, carried in _managed_walk(settings, managed_commands):
+        shape[event].append(carried)
+    return shape
+
+
+def _replacements(
+    existing: dict[str, Any], wanted: dict[str, Any], managed_commands: set[str]
+) -> list[str]:
+    """Name every managed entry that is about to be overwritten with different content.
+
+    A repeated install replaces our entries rather than appending to them,
+    which is what keeps the hook from running twice per edit. The cost is
+    that a person who raised a timeout or added an argument loses that edit
+    silently, and then cannot tell why their change stopped taking effect.
+    Saying so at install time is the whole remedy: the edit is still
+    reverted, but it is reverted out loud.
+    """
+
+    before = _managed_entries(existing, managed_commands)
+    after = _managed_entries(wanted, managed_commands)
+    changed: list[str] = []
+    for key, entry in sorted(before.items()):
+        replacement = after.get(key)
+        if replacement is not None and replacement != entry:
+            event, command = key
+            changed.append(f"{event} -> {command}")
+    return changed
+
+
+def _with_managed_hooks(
+    settings: dict[str, Any],
+    commands: dict[str, Path],
+    previous_commands: set[str],
+    path: Path,
 ) -> dict[str, Any]:
-    result = _without_managed_hooks(settings, previous_commands | {command})
+    """Install one managed entry per event, replacing any earlier ones.
+
+    Removing before appending is what makes a repeated install idempotent and
+    what retires an entry left by a runtime that has since moved.
+    """
+
+    wanted = {str(path) for path in commands.values()}
+    result = _without_managed_hooks(settings, previous_commands | wanted)
     hooks = result.setdefault("hooks", {})
     if not isinstance(hooks, dict):
-        raise InstallError("Claude settings 'hooks' must be a JSON object")
-    stop = hooks.setdefault("Stop", [])
-    if not isinstance(stop, list):
-        raise InstallError("Claude settings 'hooks.Stop' must be a JSON array")
-    stop.append(
-        {
+        raise InstallError(f"{path} 'hooks' must be a JSON object")
+    for event, command in commands.items():
+        configured = hooks.setdefault(event, [])
+        if not isinstance(configured, list):
+            raise InstallError(f"{path} 'hooks.{event}' must be a JSON array")
+        entry: dict[str, Any] = {
             "hooks": [
                 {
                     "type": "command",
-                    "command": command,
+                    "command": str(command),
                     "args": [],
                     "timeout": 10,
                 }
             ]
         }
-    )
+        matcher = MANAGED_HOOK_MATCHERS.get(event)
+        if matcher is not None:
+            entry["matcher"] = matcher
+        configured.append(entry)
     return result
 
 
@@ -190,12 +359,51 @@ def _assert_safe_user_path(home: Path, path: Path) -> None:
             raise InstallError(f"managed path contains a link-like entry: {current}")
 
 
-def _runtime_executables(bin_directory: Path) -> tuple[Path, Path]:
-    suffix = ".exe" if os.name == "nt" else ""
-    return (
-        bin_directory / f"graphctl{suffix}",
-        bin_directory / f"graphctl-claude-stop{suffix}",
-    )
+def _graphctl_executable(bin_directory: Path) -> Path:
+    """Return the runtime's ``graphctl``, which is the one the instructions name."""
+
+    return bin_directory / f"graphctl{EXECUTABLE_SUFFIX}"
+
+
+def _instruction_files(home: Path) -> tuple[Path, Path]:
+    """Return the instruction files this installer keeps a managed block in."""
+
+    return (home / CODEX_INSTRUCTIONS, home / CLAUDE_INSTRUCTIONS)
+
+
+def _hook_files(home: Path) -> tuple[Path, Path]:
+    """Return the client hook files this installer writes its entries into."""
+
+    return (home / CLAUDE_SETTINGS, home / CODEX_HOOKS)
+
+
+def _hook_commands(bin_directory: Path) -> dict[str, Path]:
+    """Map each managed hook event to the executable that serves it.
+
+    ``Stop`` fires once per assistant turn and ``SessionEnd`` once per
+    session, so the two are different events rather than two names for the
+    same one. Both clients deliver the same payload on standard input, which
+    is why one set of executables serves both.
+    """
+
+    return {
+        "SessionStart": bin_directory / f"graphctl-session-start{EXECUTABLE_SUFFIX}",
+        "Stop": bin_directory / f"graphctl-claude-stop{EXECUTABLE_SUFFIX}",
+        "SessionEnd": bin_directory / f"graphctl-session-end{EXECUTABLE_SUFFIX}",
+        "PostToolUse": bin_directory / f"graphctl-edit{EXECUTABLE_SUFFIX}",
+    }
+
+
+def _managed_commands(bin_directory: Path) -> set[str]:
+    """Return the commands that identify this installer's own hook entries.
+
+    An entry is recognised by the command it runs and by nothing else, so
+    this set is what every reader of these files compares against. Derived
+    from the runtime directory each time rather than stored, because a
+    runtime that has moved leaves entries only the old directory names.
+    """
+
+    return {str(path) for path in _hook_commands(bin_directory).values()}
 
 
 def _create_runtime(install_root: Path, python: Path) -> Path:
@@ -257,9 +465,10 @@ def _targets(
         payload / "agents/claude/graph-reviewer.md"
     )
     if runtime_bin is not None:
-        graphctl, guard = _runtime_executables(runtime_bin)
+        graphctl = _graphctl_executable(runtime_bin)
         targets[home / ".local/bin/graphctl"] = graphctl
-        targets[home / ".local/bin/graphctl-claude-stop"] = guard
+        for command in _hook_commands(runtime_bin).values():
+            targets[home / ".local/bin" / command.name] = command
     return targets
 
 
@@ -288,15 +497,16 @@ def _preflight_targets(targets: dict[Path, Path]) -> None:
 
 
 def _preflight_user_paths(home: Path, targets: dict[Path, Path]) -> None:
-    for path in (
-        home / ".codex/AGENTS.md",
-        home / ".claude/CLAUDE.md",
-        home / ".claude/settings.json",
+    for relative in (
+        CODEX_INSTRUCTIONS,
+        CODEX_HOOKS,
+        CLAUDE_INSTRUCTIONS,
+        CLAUDE_SETTINGS,
     ):
-        _assert_safe_user_path(home, path)
+        _assert_safe_user_path(home, home / relative)
     for target in targets:
         _assert_safe_user_path(home, target.parent)
-    _load_settings(home / ".claude/settings.json")
+    _load_settings(home / CLAUDE_SETTINGS)
 
 
 def _requires_copy(target: Path) -> bool:
@@ -370,11 +580,12 @@ def _backup(path: Path, home: Path, backup_root: Path) -> None:
 
 def _expected_state(
     home: Path, install_root: Path, runtime_bin: Path
-) -> tuple[dict[Path, Path], str, dict[str, Any]]:
-    graphctl, guard = _runtime_executables(runtime_bin)
+) -> tuple[dict[Path, Path], str, dict[str, Any], dict[str, Any]]:
+    graphctl = _graphctl_executable(runtime_bin)
+    commands = _hook_commands(runtime_bin)
     if not all(
         executable.is_file() and os.access(executable, os.X_OK)
-        for executable in (graphctl, guard)
+        for executable in (graphctl, *commands.values())
     ):
         raise InstallError(f"runtime executables are missing from {runtime_bin}")
     template = (ROOT / "adapters/global-instructions.md").read_text(encoding="utf-8")
@@ -383,18 +594,29 @@ def _expected_state(
     manifest = _load_manifest(install_root / "manifest.json")
     previous_runtime = manifest.get("runtime_bin")
     if isinstance(previous_runtime, str):
-        _, previous_guard = _runtime_executables(Path(previous_runtime))
-        previous_commands.add(str(previous_guard))
-    settings = _with_managed_hook(
-        _load_settings(home / ".claude/settings.json"), str(guard), previous_commands
+        previous_commands.update(_managed_commands(Path(previous_runtime)))
+    claude_path = home / CLAUDE_SETTINGS
+    codex_path = home / CODEX_HOOKS
+    settings = _with_managed_hooks(
+        _load_settings(claude_path), commands, previous_commands, claude_path
     )
-    return _targets(home, install_root / "payload", runtime_bin), block, settings
+    codex_hooks = _with_managed_hooks(
+        _load_settings(codex_path), commands, previous_commands, codex_path
+    )
+    return (
+        _targets(home, install_root / "payload", runtime_bin),
+        block,
+        settings,
+        codex_hooks,
+    )
 
 
 def install(home: Path, install_root: Path, runtime_bin: Path, dry_run: bool) -> None:
     manifest_path = install_root / "manifest.json"
     _load_manifest(manifest_path)
-    targets, block, settings = _expected_state(home, install_root, runtime_bin)
+    targets, block, settings, codex_hooks = _expected_state(
+        home, install_root, runtime_bin
+    )
     _preflight_user_paths(home, targets)
     _preflight_targets(targets)
     if dry_run:
@@ -406,21 +628,41 @@ def install(home: Path, install_root: Path, runtime_bin: Path, dry_run: bool) ->
         source_bytes = source.read_bytes()
         if not destination.exists() or destination.read_bytes() != source_bytes:
             _atomic_write(destination, source_bytes)
-    instruction_paths = (home / ".codex/AGENTS.md", home / ".claude/CLAUDE.md")
-    settings_path = home / ".claude/settings.json"
+    instruction_paths = _instruction_files(home)
+    settings_path = home / CLAUDE_SETTINGS
+    codex_hooks_path = home / CODEX_HOOKS
     instruction_updates: dict[Path, str] = {}
     for path in instruction_paths:
         existing = path.read_text(encoding="utf-8") if path.exists() else ""
         updated = _managed_instructions(existing, block)
         if updated != existing:
             instruction_updates[path] = updated
+    managed_commands = _managed_commands(runtime_bin)
+    for path, existing_document, wanted_document in (
+        (settings_path, _load_settings(settings_path), settings),
+        (codex_hooks_path, _load_settings(codex_hooks_path), codex_hooks),
+    ):
+        for replaced in _replacements(
+            existing_document, wanted_document, managed_commands
+        ):
+            print(f"replacing edited harness hook in {path}: {replaced}")
     rendered_settings = _json_bytes(settings)
     settings_changed = rendered_settings != (
         settings_path.read_bytes() if settings_path.exists() else b""
     )
+    # Codex documents the same events and the same payload, and its hook file
+    # is written even though the clients measured here parse it without
+    # running it: the entries cost nothing while that holds, and doctor
+    # reports from journal records whether they have ever fired.
+    rendered_codex = _json_bytes(codex_hooks)
+    codex_changed = rendered_codex != (
+        codex_hooks_path.read_bytes() if codex_hooks_path.exists() else b""
+    )
     changed_configs = [*instruction_updates]
     if settings_changed:
         changed_configs.append(settings_path)
+    if codex_changed:
+        changed_configs.append(codex_hooks_path)
     if changed_configs:
         backup_root = install_root / "backups" / str(time.time_ns())
         for path in changed_configs:
@@ -429,6 +671,8 @@ def install(home: Path, install_root: Path, runtime_bin: Path, dry_run: bool) ->
         _write_text(path, updated)
     if settings_changed:
         _atomic_write(settings_path, rendered_settings)
+    if codex_changed:
+        _atomic_write(codex_hooks_path, rendered_codex)
     for target, source in targets.items():
         _install_link(target, source)
     receipt = {
@@ -445,10 +689,23 @@ def install(home: Path, install_root: Path, runtime_bin: Path, dry_run: bool) ->
     print(f"installed Codex and Claude Code harness for {home}")
 
 
+def _managed_hook_files(
+    home: Path, settings: dict[str, Any], codex_hooks: dict[str, Any]
+) -> list[tuple[Path, dict[str, Any]]]:
+    """Pair each client's hook file with the content this installer expects."""
+
+    return [
+        (home / CLAUDE_SETTINGS, settings),
+        (home / CODEX_HOOKS, codex_hooks),
+    ]
+
+
 def check(home: Path, install_root: Path, runtime_bin: Path) -> None:
     if not _load_manifest(install_root / "manifest.json"):
         raise InstallError("install drift: manifest is missing")
-    targets, block, settings = _expected_state(home, install_root, runtime_bin)
+    targets, block, settings, codex_hooks = _expected_state(
+        home, install_root, runtime_bin
+    )
     problems: list[str] = []
     for relative, source in _asset_sources().items():
         installed = install_root / "payload" / relative
@@ -457,19 +714,27 @@ def check(home: Path, install_root: Path, runtime_bin: Path) -> None:
     for target, expected in targets.items():
         if not _target_matches(target, expected):
             problems.append(f"target drift: {target}")
-    for path in (home / ".codex/AGENTS.md", home / ".claude/CLAUDE.md"):
+    for path in _instruction_files(home):
         existing = path.read_text(encoding="utf-8") if path.exists() else ""
         if (
             existing.count(MANAGED_BEGIN) != 1
             or _managed_instructions(existing, block) != existing
         ):
             problems.append(f"instruction drift: {path}")
-    settings_path = home / ".claude/settings.json"
-    if (
-        not settings_path.exists()
-        or _json_bytes(settings) != settings_path.read_bytes()
-    ):
-        problems.append(f"hook drift: {settings_path}")
+    managed_commands = _managed_commands(runtime_bin)
+    for hook_path, document in _managed_hook_files(home, settings, codex_hooks):
+        # Compared as the managed entries alone, not as whole documents and
+        # not as bytes. Each narrowing closed a false positive: bytes made a
+        # client's reformatting look like drift, and whole documents made an
+        # unowned hook's *position* look like drift. The installer owns one
+        # entry per managed event and nothing else in these files, so that
+        # is the only thing it is entitled to call drift.
+        if not hook_path.exists():
+            problems.append(f"hook drift: {hook_path}")
+            continue
+        on_disk = _managed_shape(_load_settings(hook_path), managed_commands)
+        if on_disk != _managed_shape(document, managed_commands):
+            problems.append(f"hook drift: {hook_path}")
     if problems:
         raise InstallError("install drift detected:\n- " + "\n- ".join(problems))
     print("installed harness is in sync")
@@ -498,24 +763,24 @@ def uninstall(home: Path, install_root: Path) -> None:
             and _target_matches(path, expected)
         ):
             shutil.rmtree(path)
-    for path in (home / ".codex/AGENTS.md", home / ".claude/CLAUDE.md"):
+    for path in _instruction_files(home):
         _assert_safe_user_path(home, path)
         if path.exists() and not path.is_symlink():
             existing = path.read_text(encoding="utf-8")
             instruction_update = _without_managed_instructions(existing)
             if instruction_update != existing:
                 _write_text(path, instruction_update)
-    settings_path = home / ".claude/settings.json"
-    _assert_safe_user_path(home, settings_path)
-    if settings_path.exists() and not settings_path.is_symlink():
-        settings = _load_settings(settings_path)
-        managed_commands: set[str] = set()
-        if runtime_bin is not None:
-            _, guard = _runtime_executables(runtime_bin)
-            managed_commands.add(str(guard))
-        settings_update = _without_managed_hooks(settings, managed_commands)
-        if settings_update != settings:
-            _atomic_write(settings_path, _json_bytes(settings_update))
+    managed_commands: set[str] = set()
+    if runtime_bin is not None:
+        managed_commands.update(_managed_commands(runtime_bin))
+    for configured in _hook_files(home):
+        _assert_safe_user_path(home, configured)
+        if not configured.exists() or configured.is_symlink():
+            continue
+        existing_hooks = _load_settings(configured)
+        hooks_update = _without_managed_hooks(existing_hooks, managed_commands)
+        if hooks_update != existing_hooks:
+            _atomic_write(configured, _json_bytes(hooks_update))
     print(
         "removed managed Codex and Claude Code integrations; "
         "runtime retained for rollback"

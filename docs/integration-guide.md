@@ -28,10 +28,24 @@ client-specific reviewer formats remain separate regular files.
 
 The installer performs a complete collision preflight before changing client
 configuration. It atomically upserts one marked block in Codex `AGENTS.md` and
-Claude `CLAUDE.md`, merges one Claude Stop hook, writes a hash receipt, and
-backs up only configuration files that actually change. Re-running it updates
-the owned payload without duplicating blocks, hooks, or backups. It never
-replaces an unmanaged same-name skill or reviewer.
+Claude `CLAUDE.md`, merges one hook entry per managed event, writes a hash
+receipt, and backs up only configuration files that actually change. The
+managed events are `SessionStart`, `Stop`, `SessionEnd`, and `PostToolUse`;
+only the last carries a matcher, so the edit hook runs after editing tools
+and not after reads or searches. Re-running it updates the owned payload
+without duplicating blocks, hooks, or backups. It never replaces an unmanaged
+same-name skill or reviewer.
+
+An entry is recognised as the installer's own by the command it runs, which
+is an absolute path into the runtime the installer built. That has a
+consequence worth knowing before you edit one: if you change the timeout or
+the arguments of a managed entry by hand, the next install **replaces** it
+and your edit is gone. Replacing rather than appending is deliberate — a
+second entry would run the hook twice for every edit — and the install now
+prints `replacing edited harness hook in <file>: <event> -> <command>` for
+each one it overwrites, so the revert is not silent. `--check` reports the
+same edit as `hook drift` and changes nothing. To keep a different timeout,
+change it in the installer rather than in `settings.json`.
 
 The global procedure is intentionally short and refers to the existing
 organization workflow instead of restating planning, TDD, review, or security
