@@ -94,18 +94,18 @@ def _read_evidence_file(path: Path) -> str:
         raise HarnessError("evidence file must be UTF-8 JSON") from exc
 
 
-def _evidence(value: str, criterion: str | None = None) -> dict[str, str]:
+def _evidence(value: str, criterion: str | None = None) -> dict[str, Any]:
     if value.startswith("@"):
         evidence_path = _workspace_path(value[1:])
         payload = json.loads(_read_evidence_file(evidence_path))
         if not isinstance(payload, dict):
             raise HarnessError("evidence file must contain one JSON object")
-        return {str(key): str(item) for key, item in payload.items()}
+        return payload
     if value.startswith("{"):
         payload = json.loads(value)
         if not isinstance(payload, dict):
             raise HarnessError("evidence JSON must be an object")
-        return {str(key): str(item) for key, item in payload.items()}
+        return payload
     item = {"kind": "observation", "summary": value, "value": value}
     if criterion:
         item["criterion"] = criterion

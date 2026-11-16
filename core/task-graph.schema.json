@@ -103,7 +103,7 @@
         "failure_reason": {"type": ["string", "null"]},
         "executor_id": {"type": ["string", "null"]},
         "verification": {"anyOf": [{"$ref": "#/$defs/verification"}, {"type": "null"}]},
-        "failure_history": {"type": "array"},
+        "failure_history": {"type": "array", "items": {"type": "object"}},
         "attempt_history": {"type": "array"},
         "review_history": {
           "type": "array",

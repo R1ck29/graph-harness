@@ -17,11 +17,12 @@ from tests.helpers import graph, node
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 GRAPHCTL = REPOSITORY / "scripts" / "graphctl.py"
+NON_STRING_VALUES: tuple[Any, ...] = (None, False, 12, [], {})
 
 
 class MalformedGraphTests(unittest.TestCase):
     def test_non_string_status_is_a_validation_error(self) -> None:
-        for status in ([], {}, None, 1, True):
+        for status in NON_STRING_VALUES:
             with self.subTest(status=status):
                 document = graph(node("work"))
                 document["nodes"][0]["status"] = status
@@ -29,7 +30,7 @@ class MalformedGraphTests(unittest.TestCase):
                     Graph.from_dict(document)
 
     def test_failure_history_entries_must_be_objects(self) -> None:
-        for entry in (None, [], "bad", 1, False):
+        for entry in (*NON_STRING_VALUES, "bad"):
             with self.subTest(entry=entry):
                 document = graph(node("work"))
                 document["nodes"][0]["failure_history"] = [entry]
@@ -130,7 +131,7 @@ class EvidenceInputTests(unittest.TestCase):
                 ),
             ):
                 for field in ("criterion", "kind", "summary", "value"):
-                    for value in (None, False, 12, [], {}):
+                    for value in NON_STRING_VALUES:
                         for source in ("inline", "file"):
                             with self.subTest(
                                 command=command, field=field, value=value, source=source
