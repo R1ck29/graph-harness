@@ -1,3 +1,27 @@
+# GH-1: 堅牢性監査とパッチリリース
+
+既存の CLI、設定、JSON 形式、ワークスペース構成を維持し、0.1.0 から
+0.1.1 への更新を準備する。過去の作業記録は以下に保持する。
+
+- [ ] コード・仕様・テストを読み、既存 431 テストのベースラインを確認する。
+- [ ] 不正なグラフ入力、null の証拠値、superseded ノードの再開を
+      それぞれ失敗する回帰テストで再現する。
+- [ ] 共通の検証境界と状態遷移を修正し、回帰テストを成功させる。
+- [ ] 日本語のリリース・ロールバック手順と CHANGELOG を追加し、
+      すべてのパッケージバージョンを更新する。
+- [ ] 全テスト、Black、mypy、アダプター同期、オフライン評価を実行する。
+- [ ] 差分レビュー結果と検証結果を記録し、単一の日本語 PR を更新する。
+
+実行計画は `graphctl` で作成する。ユーザー指示によりサブエージェントを
+起動しないため、独立レビューの PASS を自己発行しない。
+
+## GH-1 レビュー・検証結果
+
+作業開始時: `origin/main` から `ai/gh-1` を作成。ベースライン実行中。
+この環境では `python` コマンドがないため、実行には `python3` を使用する。
+
+---
+
 # Plan: observe conformance from a signal that cannot mistake a pull for work
 
 Objective: judge a session on direct evidence that it changed code, and report
