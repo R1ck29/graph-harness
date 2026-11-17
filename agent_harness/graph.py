@@ -159,7 +159,7 @@ class Graph:
                 raise HarnessError(f"node {node_id} {field} must be non-empty")
             if len(node[field]) > MAX_TEXT:
                 raise HarnessError(f"node {node_id} {field} exceeds the text limit")
-        if node["status"] not in STATUSES:
+        if not isinstance(node["status"], str) or node["status"] not in STATUSES:
             raise HarnessError(f"node {node_id} has invalid status: {node['status']!r}")
         if not isinstance(node["depends_on"], list) or not all(
             isinstance(value, str) for value in node["depends_on"]
@@ -226,6 +226,12 @@ class Graph:
                 )
         if not isinstance(node.get("failure_history", []), list):
             raise HarnessError(f"node {node_id} failure_history must be a list")
+        if not all(
+            isinstance(record, dict) for record in node.get("failure_history", [])
+        ):
+            raise HarnessError(
+                f"node {node_id} failure_history entries must be objects"
+            )
         if not isinstance(node.get("attempt_history", []), list):
             raise HarnessError(f"node {node_id} attempt_history must be a list")
         self._validate_review_history(
@@ -1085,7 +1091,7 @@ class Graph:
         for descendant_id in self.descendants(node_id):
             node = self.node(descendant_id)
             previous = node["status"]
-            if previous == "failed":
+            if previous in {"failed", "superseded"}:
                 continue
             node.setdefault("failure_history", []).append(
                 {

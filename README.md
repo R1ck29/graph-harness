@@ -1,5 +1,8 @@
 # Graph Engineering Agent Harness
 
+更新・リリース・ロールバックの手順は [リリース手順](docs/RELEASING.md)、
+バージョンごとの変更点は [変更履歴](CHANGELOG.md) を参照してください。
+
 A small, vendor-neutral task-state harness for coding and other structured work.
 It records an objective as a DAG, code-gates state transitions, requires explicit
 executor and reviewer evidence, and retries only affected descendants. The

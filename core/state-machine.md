@@ -17,8 +17,9 @@ affected descendant -> invalidated -> ready or blocked (retry)
 - `verify` is the only transition to `verified` or `failed`.
 - `withdraw` returns only an UNCERTAIN submission to its original executor for
   stronger evidence; it keeps the current attempt count.
-- A FAIL review may reopen one verified ancestor as `failed` when that ancestor
-  is reported as the cause; all of its descendants become `invalidated`.
+- FAIL レビューで verified な祖先を原因に指定すると、その祖先は `failed` に
+  戻る。子孫のうち `failed` / `superseded` 以外を `invalidated` にする。
+  廃止済みノードの記録は保持し、その先の子孫への無効化は継続する。
 - `retry` refuses a node whose `attempts` reached `max_attempts`.
 - `grant-attempt` raises one node's `max_attempts` by one and never touches
   `attempts`, so the failures that spent the budget stay counted. It records
