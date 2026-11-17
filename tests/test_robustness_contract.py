@@ -30,7 +30,8 @@ class MalformedGraphTests(unittest.TestCase):
                     Graph.from_dict(document)
 
     def test_failure_history_entries_must_be_objects(self) -> None:
-        for entry in (None, False, 12, [], "bad"):
+        invalid_entries: tuple[Any, ...] = (None, False, 12, [], "bad")
+        for entry in invalid_entries:
             with self.subTest(entry=entry):
                 document = graph(node("work"))
                 document["nodes"][0]["failure_history"] = [entry]
