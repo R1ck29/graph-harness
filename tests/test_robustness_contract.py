@@ -30,12 +30,20 @@ class MalformedGraphTests(unittest.TestCase):
                     Graph.from_dict(document)
 
     def test_failure_history_entries_must_be_objects(self) -> None:
-        for entry in (*NON_STRING_VALUES, "bad"):
+        for entry in (None, False, 12, [], "bad"):
             with self.subTest(entry=entry):
                 document = graph(node("work"))
                 document["nodes"][0]["failure_history"] = [entry]
                 with self.assertRaisesRegex(HarnessError, "work.*failure_history"):
                     Graph.from_dict(document)
+
+    def test_failure_history_objects_are_preserved_when_read(self) -> None:
+        document = graph(node("work"))
+        history = [{}, {"summary": "legacy record", "metadata": None}]
+        document["nodes"][0]["failure_history"] = history
+        task_graph = Graph.from_dict(document)
+        self.assertEqual(history, task_graph.failure_records())
+        self.assertEqual(history, task_graph.to_dict()["nodes"][0]["failure_history"])
 
     def test_readers_report_malformed_graph_without_tracebacks_or_writes(self) -> None:
         with tempfile.TemporaryDirectory(dir=workspace_root()) as directory:
