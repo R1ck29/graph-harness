@@ -84,3 +84,18 @@ GitHub CI の全 OS / Python 行列の結果は PR のチェックを参照す�
 - https://github.com/R1ck29/graph-harness/blob/main/scripts/install_pc.py
 - https://semver.org/lang/ja/
 - https://keepachangelog.com/ja/1.1.0/
+
+## 最終ゲートの状態
+
+`dc17a93` の GitHub CI は push / pull_request の両方で成功。
+Ubuntu / macOS / Windows × Python 3.10 / 3.12 / 3.13 の9行列と
+静的チェックがすべて成功した。
+
+- https://github.com/R1ck29/graph-harness/actions/runs/43990331708
+- https://github.com/R1ck29/graph-harness/actions/runs/43990339875
+
+作業グラフの3 criterion に証拠を関連付け、`graphctl submit gh-1` を実行済み。
+レビュー用の `graphctl review-packet gh-1` 出力は
+`tasks/artifacts/gh-1-review-packet.json` に保存した。
+`graphctl completion-check` は exit 2（`unverified nodes: ['gh-1']`）。
+独立レビュー待ちによる未完了であり、自己承認・独立PASSの代筆はしていない。
